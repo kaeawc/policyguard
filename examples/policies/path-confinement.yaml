@@ -1,0 +1,24 @@
+# Filesystem writes derived from user-controlled paths must be confined.
+#
+# Any function that pulls a user-supplied path AND reaches a write/delete
+# sink must also call the path-confinement helper. This is intra-
+# procedural in the MVP — the helper just needs to be on the same path.
+id: path-confinement-on-fs-write
+severity: error
+languages: [python]
+source:
+  any_of:
+    - calls: app.input.user_path
+    - calls: request.values.get
+    - calls: flask.request.args.get
+sink:
+  any_of:
+    - calls: open
+    - calls: os.remove
+    - calls: shutil.rmtree
+    - calls: pathlib.Path.write_text
+guard:
+  any_of:
+    - calls: app.paths.confine_to_workspace
+    - calls: paths.confine_to_workspace
+message: User-controlled path reaches a filesystem write sink without confinement.

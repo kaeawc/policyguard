@@ -137,3 +137,16 @@ func TestExample_LogUserMustRedact(t *testing.T) {
 		"logging.info",
 	)
 }
+
+func TestExample_PathConfinement(t *testing.T) {
+	runExample(t,
+		"examples/policies/path-confinement.yaml",
+		"tests/fixtures/python/policies/path_confinement",
+		// "open" is matched via the engine's raw-text fallback because
+		// the resolver maps the bare builtin to a module-local FQN.
+		// runExample asserts on the resolved Sink.Callee, which for
+		// `open(...)` becomes <module>.open. We pin the violating
+		// fixture's module so this stays stable.
+		"app.handlers.open",
+	)
+}
