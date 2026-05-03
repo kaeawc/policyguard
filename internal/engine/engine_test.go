@@ -284,6 +284,85 @@ func TestAnalyze_DecoratorGuardOnTransitiveCallee(t *testing.T) {
 	}
 }
 
+func fakeField(caller callgraph.FQN, path, field string, file *scanner.File, line int) *callgraph.FieldAccess {
+	return &callgraph.FieldAccess{
+		Caller: caller,
+		Field:  field,
+		Path:   path,
+		File:   file,
+		Line:   line,
+	}
+}
+
+func TestAnalyze_FieldAccessAsSource_WildcardField(t *testing.T) {
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/h.py")
+	const fn callgraph.FQN = "svc.h.fetch"
+	g.AddFunc(&callgraph.FuncNode{FQN: fn, File: f, Line: 1})
+	g.AddField(fakeField(fn, "user.email", "email", f, 2))
+	g.AddCall(fakeCall(fn, "anthropic.messages.create", f, 3))
+
+	p := basicPolicy()
+	p.Source = policy.Matcher{AnyOf: []policy.Predicate{
+		{FieldAccess: "*.email"},
+	}}
+	findings := Analyze(g, p)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1: %+v", len(findings), findings)
+	}
+	if string(findings[0].Source.Callee) != "user.email" {
+		t.Errorf("Source.Callee = %q, want 'user.email' (the field-access path)", findings[0].Source.Callee)
+	}
+	if findings[0].Source.Line != 2 {
+		t.Errorf("Source.Line = %d, want 2", findings[0].Source.Line)
+	}
+}
+
+func TestAnalyze_FieldAccessAsSource_ExactPath(t *testing.T) {
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/h.py")
+	const fn callgraph.FQN = "svc.h.fetch"
+	g.AddFunc(&callgraph.FuncNode{FQN: fn, File: f, Line: 1})
+	g.AddField(fakeField(fn, "request.body.path", "path", f, 2))
+	g.AddField(fakeField(fn, "user.email", "email", f, 3))
+	g.AddCall(fakeCall(fn, "anthropic.messages.create", f, 4))
+
+	p := basicPolicy()
+	// Exact path match — only request.body.path should fire, not user.email.
+	p.Source = policy.Matcher{AnyOf: []policy.Predicate{
+		{FieldAccess: "request.body.path"},
+	}}
+	findings := Analyze(g, p)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1: %+v", len(findings), findings)
+	}
+	if string(findings[0].Source.Callee) != "request.body.path" {
+		t.Errorf("Source.Callee = %q", findings[0].Source.Callee)
+	}
+}
+
+func TestAnalyze_FieldAccessSourceWithCallSink(t *testing.T) {
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/h.py")
+	const fn callgraph.FQN = "svc.h.fetch"
+	g.AddFunc(&callgraph.FuncNode{FQN: fn, File: f, Line: 1})
+	// Source is a field access; sink is a call. Mixed source/sink kinds.
+	g.AddField(fakeField(fn, "user.email", "email", f, 2))
+	g.AddCall(fakeCall(fn, "anthropic.messages.create", f, 3))
+
+	p := basicPolicy()
+	p.Source = policy.Matcher{AnyOf: []policy.Predicate{
+		{FieldAccess: "*.email"},
+	}}
+	findings := Analyze(g, p)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1: %+v", len(findings), findings)
+	}
+	if string(findings[0].Sink.Callee) != "anthropic.messages.create" {
+		t.Errorf("Sink.Callee = %q", findings[0].Sink.Callee)
+	}
+}
+
 func TestAnalyze_HandlesCycles(t *testing.T) {
 	// a -> b -> a (cycle). a has the source, b has the sink. The
 	// closure walker must terminate.

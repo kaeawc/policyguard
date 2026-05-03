@@ -1,9 +1,10 @@
 # PII redaction before LLM
 #
 # Any codepath that loads a user record (or other PII source) and reaches
-# an LLM API must pass through a redactor first. Supported predicates:
-# `calls` (exact or trailing `.*` wildcard) and `has_decorator`.
-# `field_access` is reserved for a future revision.
+# an LLM API must pass through a redactor first. All three predicate
+# kinds are honored: `calls`, `has_decorator`, and `field_access`. The
+# field-access pattern `*.<name>` matches any attribute read of that
+# name regardless of the receiver.
 id: pii-redaction-before-llm
 severity: error
 languages: [python]
@@ -12,6 +13,7 @@ source:
     - calls: app.handlers.load_user
     - calls: user_repo.get_user
     - calls: session.current_user
+    - field_access: "*.email"
 sink:
   any_of:
     - calls: anthropic.messages.create

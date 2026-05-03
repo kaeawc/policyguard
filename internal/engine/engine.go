@@ -84,8 +84,9 @@ func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 	violators := make(map[callgraph.FQN]Finding, 0)
 	for fqn := range g.Funcs {
 		sites := collectSites(g, closures[fqn])
+		fields := collectFields(g, closures[fqn])
 		decorators := collectDecorators(g, closures[fqn])
-		f, ok := evaluate(p, sites, decorators, fqn)
+		f, ok := evaluate(p, sites, fields, decorators, fqn)
 		if !ok {
 			continue
 		}
@@ -124,14 +125,30 @@ func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 // closures don't apply at module scope. Module scope has no decorators.
 func analyzeModuleScope(g *callgraph.Graph, p *policy.Policy) []Finding {
 	sites := g.Calls[""]
-	if len(sites) == 0 {
+	fields := g.Fields[""]
+	if len(sites) == 0 && len(fields) == 0 {
 		return nil
 	}
-	f, ok := evaluate(p, sites, nil, "")
+	f, ok := evaluate(p, sites, fields, nil, "")
 	if !ok {
 		return nil
 	}
 	return []Finding{f}
+}
+
+// collectFields returns the union of field-access sites across every
+// function in the closure, in stable FQN order.
+func collectFields(g *callgraph.Graph, closure map[callgraph.FQN]bool) []*callgraph.FieldAccess {
+	fqns := make([]callgraph.FQN, 0, len(closure))
+	for fqn := range closure {
+		fqns = append(fqns, fqn)
+	}
+	sort.Slice(fqns, func(i, j int) bool { return fqns[i] < fqns[j] })
+	var out []*callgraph.FieldAccess
+	for _, fqn := range fqns {
+		out = append(out, g.Fields[fqn]...)
+	}
+	return out
 }
 
 // collectDecorators returns the union of decorator names across every
@@ -169,19 +186,19 @@ func matcherMatchesDecorators(m policy.Matcher, decorators []string) bool {
 	return false
 }
 
-// evaluate applies the source/guard/sink check to a call-site set plus
-// any decorators present on functions in the same closure. Returns the
-// finding (with caller substituted for display) and whether it violates
-// the policy.
-func evaluate(p *policy.Policy, sites []*callgraph.CallSite, decorators []string, caller callgraph.FQN) (Finding, bool) {
-	if matcherMatchesAny(p.Guard, sites) || matcherMatchesDecorators(p.Guard, decorators) {
+// evaluate applies the source/guard/sink check across all evidence kinds
+// available at this scope: call sites, field-access sites, and the
+// decorators present on functions in the closure. Returns the finding
+// and whether it violates the policy.
+func evaluate(p *policy.Policy, sites []*callgraph.CallSite, fields []*callgraph.FieldAccess, decorators []string, caller callgraph.FQN) (Finding, bool) {
+	if guardSatisfied(p.Guard, sites, fields, decorators) {
 		return Finding{}, false
 	}
-	src := firstMatch(p.Source, sites)
+	src, srcSite := firstMatchAny(p.Source, sites, fields)
 	if src == nil {
 		return Finding{}, false
 	}
-	sink := firstMatch(p.Sink, sites)
+	sink, sinkSite := firstMatchAny(p.Sink, sites, fields)
 	if sink == nil {
 		return Finding{}, false
 	}
@@ -190,9 +207,21 @@ func evaluate(p *policy.Policy, sites []*callgraph.CallSite, decorators []string
 		Severity: p.Severity,
 		Message:  p.Message,
 		Function: displayCaller(caller),
-		Source:   siteOf(src),
-		Sink:     siteOf(sink),
+		Source:   srcSite,
+		Sink:     sinkSite,
 	}, true
+}
+
+// guardSatisfied reports whether the guard matcher fires against the
+// given evidence (call sites, field-access reads, or decorators).
+func guardSatisfied(m policy.Matcher, sites []*callgraph.CallSite, fields []*callgraph.FieldAccess, decorators []string) bool {
+	if matcherMatchesDecorators(m, decorators) {
+		return true
+	}
+	if hit, _ := firstMatchAny(m, sites, fields); hit != nil {
+		return true
+	}
+	return false
 }
 
 // buildCalleeMap inverts g.Calls into caller -> set of internal callees.
@@ -271,47 +300,66 @@ func siteOf(c *callgraph.CallSite) FindingSite {
 	}
 }
 
-// firstMatch returns the first call site in sites that matches m, or nil.
-func firstMatch(m policy.Matcher, sites []*callgraph.CallSite) *callgraph.CallSite {
+// firstMatchAny searches calls and fields for the first match. Returns
+// (matched, FindingSite) — `matched` is non-nil if either kind found a
+// hit. Calls are searched first to keep behavior identical when only
+// `calls` predicates are used.
+func firstMatchAny(m policy.Matcher, sites []*callgraph.CallSite, fields []*callgraph.FieldAccess) (any, FindingSite) {
 	for _, s := range sites {
-		if matcherMatches(m, s) {
-			return s
+		if matcherMatchesCall(m, s) {
+			return s, siteOf(s)
 		}
 	}
-	return nil
+	for _, f := range fields {
+		if matcherMatchesField(m, f) {
+			return f, fieldSiteOf(f)
+		}
+	}
+	return nil, FindingSite{}
 }
 
-// matcherMatchesAny reports whether at least one site in sites matches m.
-func matcherMatchesAny(m policy.Matcher, sites []*callgraph.CallSite) bool {
-	return firstMatch(m, sites) != nil
-}
-
-// matcherMatches reports whether the matcher's any_of disjunction matches
-// the given call site.
-func matcherMatches(m policy.Matcher, site *callgraph.CallSite) bool {
+// matcherMatchesCall reports whether the call site matches any `calls`
+// predicate in m.
+func matcherMatchesCall(m policy.Matcher, site *callgraph.CallSite) bool {
 	for _, pred := range m.AnyOf {
-		if predicateMatchesSite(pred, site) {
+		if pred.Kind() == "calls" && callsMatches(pred.Calls, site) {
 			return true
 		}
 	}
 	return false
 }
 
-// predicateMatchesSite is true if pred matches site. The `calls`
-// predicate supports exact match plus trailing `.*` wildcard; the
-// `has_decorator` predicate is evaluated at function granularity (see
-// matcherMatchesDecorators) so it always returns false here. The
-// `field_access` predicate is not yet wired — the call graph builder
-// doesn't surface attribute reads.
-func predicateMatchesSite(pred policy.Predicate, site *callgraph.CallSite) bool {
-	switch pred.Kind() {
-	case "calls":
-		return callsMatches(pred.Calls, site)
-	case "has_decorator", "field_access":
-		return false
-	default:
-		return false
+// matcherMatchesField reports whether the field access matches any
+// `field_access` predicate in m.
+func matcherMatchesField(m policy.Matcher, f *callgraph.FieldAccess) bool {
+	for _, pred := range m.AnyOf {
+		if pred.Kind() == "field_access" && fieldMatches(pred.FieldAccess, f) {
+			return true
+		}
 	}
+	return false
+}
+
+// fieldSiteOf converts a FieldAccess to a FindingSite. Callee carries
+// the full path text so consumers can locate the read.
+func fieldSiteOf(f *callgraph.FieldAccess) FindingSite {
+	return FindingSite{
+		Callee: callgraph.FQN(f.Path),
+		Path:   f.File.Path,
+		Line:   f.Line,
+	}
+}
+
+// fieldMatches matches a field-access pattern against a FieldAccess.
+// Supported patterns:
+//
+//	*.<field>     — any access whose attribute is exactly <field>
+//	<exact>       — exact path match (e.g. "user.email")
+func fieldMatches(pattern string, f *callgraph.FieldAccess) bool {
+	if strings.HasPrefix(pattern, "*.") {
+		return f.Field == strings.TrimPrefix(pattern, "*.")
+	}
+	return f.Path == pattern
 }
 
 // callsMatches matches a callee FQN against a pattern. A pattern ending
