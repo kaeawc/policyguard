@@ -16,8 +16,9 @@ import (
 	"github.com/kaeawc/policyguard/internal/scanner"
 )
 
-// Run is the main entry point. argv excludes the program name.
-func Run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
+// Run is the main entry point. argv excludes the program name. version is
+// the build-time version string injected via -ldflags.
+func Run(ctx context.Context, version string, argv []string, stdout, stderr io.Writer) int {
 	if len(argv) == 0 {
 		usage(stderr)
 		return 2
@@ -28,6 +29,9 @@ func Run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
 		return runParse(ctx, rest, stdout, stderr)
 	case "callgraph":
 		return runCallgraph(ctx, rest, stdout, stderr)
+	case "version", "-v", "--version":
+		fmt.Fprintln(stdout, version)
+		return 0
 	case "-h", "--help", "help":
 		usage(stdout)
 		return 0
@@ -43,6 +47,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  parse     [--lang LANG] FILE [FILE...]   Parse files and print AST root info.")
 	fmt.Fprintln(w, "  callgraph [--lang LANG] DIR              Build a call graph for a directory.")
+	fmt.Fprintln(w, "  version                                  Print the policyguard version.")
 }
 
 func runParse(ctx context.Context, argv []string, stdout, stderr io.Writer) int {

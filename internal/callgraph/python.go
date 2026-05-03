@@ -20,7 +20,7 @@ func BuildPython(files []*scanner.File, rootDir string) *Graph {
 		}
 		modFQN := pythonModuleFQN(f.Path, rootDir)
 		ext := newPyExtractor(g, f, modFQN)
-		ext.walk(f.Root(), nil)
+		ext.walk(f.Root())
 	}
 	return g
 }
@@ -62,7 +62,7 @@ func newPyExtractor(g *Graph, f *scanner.File, modFQN FQN) *pyExtractor {
 	}
 }
 
-func (e *pyExtractor) walk(n *sitter.Node, parent *sitter.Node) {
+func (e *pyExtractor) walk(n *sitter.Node) {
 	if n == nil {
 		return
 	}
@@ -84,7 +84,7 @@ func (e *pyExtractor) walk(n *sitter.Node, parent *sitter.Node) {
 		// fall through to recurse into args (which may contain nested calls)
 	}
 	for i := 0; i < int(n.NamedChildCount()); i++ {
-		e.walk(n.NamedChild(i), n)
+		e.walk(n.NamedChild(i))
 	}
 }
 
@@ -154,7 +154,7 @@ func (e *pyExtractor) handleClass(n *sitter.Node) {
 	body := n.ChildByFieldName("body")
 	if body != nil {
 		for i := 0; i < int(body.NamedChildCount()); i++ {
-			e.walk(body.NamedChild(i), body)
+			e.walk(body.NamedChild(i))
 		}
 	}
 }
@@ -187,7 +187,7 @@ func (e *pyExtractor) handleFunction(n *sitter.Node) {
 	body := n.ChildByFieldName("body")
 	if body != nil {
 		for i := 0; i < int(body.NamedChildCount()); i++ {
-			e.walk(body.NamedChild(i), body)
+			e.walk(body.NamedChild(i))
 		}
 	}
 }

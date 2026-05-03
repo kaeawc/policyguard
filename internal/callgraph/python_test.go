@@ -58,9 +58,9 @@ func TestBuildPython_BasicReachability(t *testing.T) {
 		t.Fatalf("expected calls under fetch_user_summary, got none")
 	}
 	wantCallees := map[FQN]bool{
-		"app.handlers.load_user":      false,
-		"app.redactor.redact":         false,
-		"anthropic.messages.create":   false,
+		"app.handlers.load_user":    false,
+		"app.redactor.redact":       false,
+		"anthropic.messages.create": false,
 	}
 	for _, c := range calls {
 		if _, ok := wantCallees[c.Callee]; ok {
