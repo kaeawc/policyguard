@@ -86,6 +86,12 @@ func (e *tsExtractor) walk(n *sitter.Node) {
 	case "method_definition":
 		e.handleMethod(n)
 		return
+	case "lexical_declaration", "variable_declaration":
+		e.handleVariableDeclaration(n)
+		return
+	case "export_statement":
+		e.handleExport(n)
+		return
 	case "call_expression":
 		e.handleCall(n)
 		// fall through to recurse into args
@@ -180,6 +186,58 @@ func (e *tsExtractor) handleImportSpecifier(spec *sitter.Node, source string) {
 	e.imports[local] = FQN(source + "." + original)
 }
 
+// handleVariableDeclaration captures arrow-function and function-
+// expression bindings:
+//
+//	const foo = () => { ... };
+//	let bar = function() { ... };
+//
+// The binding name becomes the function FQN. Bindings whose initializer
+// isn't a function are walked normally (their initializers may contain
+// nested calls or class expressions).
+func (e *tsExtractor) handleVariableDeclaration(n *sitter.Node) {
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		decl := n.NamedChild(i)
+		if decl.Type() != "variable_declarator" {
+			e.walk(decl)
+			continue
+		}
+		e.handleVariableDeclarator(decl)
+	}
+}
+
+func (e *tsExtractor) handleVariableDeclarator(decl *sitter.Node) {
+	name := decl.ChildByFieldName("name")
+	value := decl.ChildByFieldName("value")
+	if name == nil || value == nil {
+		// Walk children to surface any nested calls/declarations.
+		for i := 0; i < int(decl.NamedChildCount()); i++ {
+			e.walk(decl.NamedChild(i))
+		}
+		return
+	}
+	switch value.Type() {
+	case "arrow_function", "function_expression":
+		if name.Type() != "identifier" {
+			// Destructuring bindings (object/array patterns) — not yet
+			// supported; just walk the initializer for nested calls.
+			e.walk(value)
+			return
+		}
+		e.recordAndRecurse(value, e.text(name))
+	default:
+		e.walk(value)
+	}
+}
+
+// handleExport unwraps `export ...` so the inner declaration (function,
+// class, lexical binding) is processed normally.
+func (e *tsExtractor) handleExport(n *sitter.Node) {
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		e.walk(n.NamedChild(i))
+	}
+}
+
 func (e *tsExtractor) handleClass(n *sitter.Node) {
 	// class_declaration: type_identifier (name), class_body (members)
 	var name *sitter.Node
@@ -268,11 +326,18 @@ func (e *tsExtractor) recordAndRecurse(defNode *sitter.Node, funcName string) {
 			}
 		}
 	}
-	if body != nil {
+	if body == nil {
+		return
+	}
+	if body.Type() == "statement_block" {
+		// Block body: recurse into each statement.
 		for i := 0; i < int(body.NamedChildCount()); i++ {
 			e.walk(body.NamedChild(i))
 		}
+		return
 	}
+	// Expression body (concise arrow): walk the expression itself.
+	e.walk(body)
 }
 
 func (e *tsExtractor) handleCall(n *sitter.Node) {
