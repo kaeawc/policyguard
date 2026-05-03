@@ -21,5 +21,6 @@ go.work.sum
 # Local binary outputs
 /policyguard
 /dist/
+/baselines/
 
 .claude/

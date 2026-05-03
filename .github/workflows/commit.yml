@@ -33,6 +33,28 @@ jobs:
       - name: Run policyguard against bundled fixtures
         run: make check-fixtures
 
+  baseline-check:
+    # False-positive baseline: policyguard must report zero findings on a
+    # known-clean public Python codebase. Pinned to a release tag so the
+    # baseline doesn't drift with upstream.
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+      - name: Build policyguard
+        run: go build -o policyguard ./cmd/policyguard/
+      - name: Clone baseline corpus (psf/black @ 24.10.0)
+        uses: actions/checkout@v6
+        with:
+          repository: psf/black
+          ref: '24.10.0'
+          path: baselines/black
+      - name: Run policyguard against baseline (expect 0 findings)
+        run: ./policyguard check --policies examples/policies baselines/black/src
+
   test:
     runs-on: ubuntu-latest
     steps:
