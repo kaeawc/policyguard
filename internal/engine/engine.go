@@ -2,16 +2,25 @@
 // policy, it produces findings for every function that violates the
 // source -> guard -> sink contract.
 //
-// MVP scope (intra-procedural):
+// Detection model (closure-based interprocedural):
 //
-//	A violation is a function F such that:
-//	  * F contains a source-matching call site, AND
-//	  * F contains a sink-matching call site, AND
-//	  * F contains no guard-matching call site or decorator.
+//	For each internal function F, build the closure: F plus every
+//	internal function transitively reachable from F via the call graph.
+//	The union of all call sites in the closure is F's "effective" call
+//	site set. F violates the contract iff its effective set contains a
+//	source-matching site AND a sink-matching site AND no guard-matching
+//	site.
 //
-// Interprocedural extension (call F -> G with the sink in G) is a
-// follow-up. Documented as TODO at the boundary so callers know not to
-// rely on transitive reachability yet.
+// This catches both intra-procedural cases (source/sink/guard in the
+// same function) and interprocedural cases where, e.g., a wrapper
+// function calls one helper that produces PII and another helper that
+// hands it to an LLM.
+//
+// Module-scope code (caller == "") is analyzed intra-procedurally only;
+// transitive expansion isn't meaningful at module scope.
+//
+// `has_decorator` and `field_access` predicates are still stubbed (the
+// call-graph builder doesn't extract decorators or attribute reads yet).
 package engine
 
 import (
@@ -28,8 +37,9 @@ type Finding struct {
 	Severity policy.Severity
 	Message  string
 
-	// Function is the FQN of the function containing the violation, or
-	// "<module>" when the offending sites are at module scope.
+	// Function is the FQN at which the violation is rooted. For an
+	// interprocedural finding this is the smallest closure containing
+	// both source and sink (the "minimal violator").
 	Function callgraph.FQN
 
 	// Source and Sink point at the offending call sites.
@@ -44,46 +54,168 @@ type FindingSite struct {
 	Line   int
 }
 
-// Analyze runs one policy over the call graph and returns any violations,
+// Analyze runs one policy over the call graph and returns the violations,
 // sorted deterministically by function FQN then source line.
 func Analyze(g *callgraph.Graph, p *policy.Policy) []Finding {
-	var out []Finding
-	// Iterate every caller (functions and module scope).
-	for caller, sites := range g.Calls {
-		hasGuard := matcherMatchesAny(p.Guard, sites) || functionHasGuardDecorator(g, caller, p.Guard)
-		if hasGuard {
-			continue
-		}
-		var sources, sinks []*callgraph.CallSite
-		for _, site := range sites {
-			if matcherMatches(p.Source, site) {
-				sources = append(sources, site)
-			}
-			if matcherMatches(p.Sink, site) {
-				sinks = append(sinks, site)
-			}
-		}
-		if len(sources) == 0 || len(sinks) == 0 {
-			continue
-		}
-		// One finding per (source, sink) pair within this function. For
-		// MVP we report only the first pair to keep noise down; full
-		// pairing is a follow-up.
-		out = append(out, Finding{
-			PolicyID: p.ID,
-			Severity: p.Severity,
-			Message:  p.Message,
-			Function: displayCaller(caller),
-			Source:   siteOf(sources[0]),
-			Sink:     siteOf(sinks[0]),
-		})
-	}
+	out := analyzeFunctions(g, p)
+	out = append(out, analyzeModuleScope(g, p)...)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Function != out[j].Function {
 			return out[i].Function < out[j].Function
 		}
+		if out[i].Source.Path != out[j].Source.Path {
+			return out[i].Source.Path < out[j].Source.Path
+		}
 		return out[i].Source.Line < out[j].Source.Line
 	})
+	return out
+}
+
+// analyzeFunctions runs the interprocedural closure check over every
+// internal function in g. Findings are deduped to "minimal violators" —
+// when F calls G and both their closures violate, only G is reported.
+func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
+	callees := buildCalleeMap(g)
+	closures := make(map[callgraph.FQN]map[callgraph.FQN]bool, len(g.Funcs))
+	for fqn := range g.Funcs {
+		closures[fqn] = transitiveCallees(fqn, callees)
+	}
+
+	violators := make(map[callgraph.FQN]Finding, 0)
+	for fqn := range g.Funcs {
+		sites := collectSites(g, closures[fqn])
+		f, ok := evaluate(p, sites, fqn)
+		if !ok {
+			continue
+		}
+		violators[fqn] = f
+	}
+
+	// Minimal-violator dedup: drop F if any internal callee G in F's
+	// closure is also a violator AND G has a strictly smaller closure
+	// than F. The strict-subset check matters for cycles — when F and G
+	// share the same closure (mutual recursion) neither is "smaller" and
+	// we keep both rather than silently dropping all cycle members.
+	var out []Finding
+	for fqn, f := range violators {
+		minimal := true
+		for callee := range closures[fqn] {
+			if callee == fqn {
+				continue
+			}
+			if _, ok := violators[callee]; !ok {
+				continue
+			}
+			if len(closures[callee]) < len(closures[fqn]) {
+				minimal = false
+				break
+			}
+		}
+		if minimal {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// analyzeModuleScope runs the original intra-procedural check on the
+// "<module>" caller bucket. Findings here are kept distinct because
+// closures don't apply at module scope.
+func analyzeModuleScope(g *callgraph.Graph, p *policy.Policy) []Finding {
+	sites := g.Calls[""]
+	if len(sites) == 0 {
+		return nil
+	}
+	f, ok := evaluate(p, sites, "")
+	if !ok {
+		return nil
+	}
+	return []Finding{f}
+}
+
+// evaluate applies the source/guard/sink check to a call-site set. Returns
+// the finding (with caller substituted for display) and whether it
+// violates the policy.
+func evaluate(p *policy.Policy, sites []*callgraph.CallSite, caller callgraph.FQN) (Finding, bool) {
+	if matcherMatchesAny(p.Guard, sites) {
+		return Finding{}, false
+	}
+	src := firstMatch(p.Source, sites)
+	if src == nil {
+		return Finding{}, false
+	}
+	sink := firstMatch(p.Sink, sites)
+	if sink == nil {
+		return Finding{}, false
+	}
+	return Finding{
+		PolicyID: p.ID,
+		Severity: p.Severity,
+		Message:  p.Message,
+		Function: displayCaller(caller),
+		Source:   siteOf(src),
+		Sink:     siteOf(sink),
+	}, true
+}
+
+// buildCalleeMap inverts g.Calls into caller -> set of internal callees.
+// Only callees that resolve to functions in g.Funcs are included; external
+// names are call-graph leaves and don't expand the closure.
+func buildCalleeMap(g *callgraph.Graph) map[callgraph.FQN][]callgraph.FQN {
+	out := make(map[callgraph.FQN][]callgraph.FQN, len(g.Calls))
+	seen := make(map[callgraph.FQN]map[callgraph.FQN]bool, len(g.Calls))
+	for caller, sites := range g.Calls {
+		if caller == "" {
+			continue
+		}
+		for _, s := range sites {
+			if _, ok := g.Funcs[s.Callee]; !ok {
+				continue
+			}
+			if _, ok := seen[caller]; !ok {
+				seen[caller] = make(map[callgraph.FQN]bool)
+			}
+			if seen[caller][s.Callee] {
+				continue
+			}
+			seen[caller][s.Callee] = true
+			out[caller] = append(out[caller], s.Callee)
+		}
+	}
+	return out
+}
+
+// transitiveCallees returns the closure of start under callees, including
+// start itself. Cycles are handled via the visited set.
+func transitiveCallees(start callgraph.FQN, callees map[callgraph.FQN][]callgraph.FQN) map[callgraph.FQN]bool {
+	visited := map[callgraph.FQN]bool{start: true}
+	stack := []callgraph.FQN{start}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, c := range callees[n] {
+			if !visited[c] {
+				visited[c] = true
+				stack = append(stack, c)
+			}
+		}
+	}
+	return visited
+}
+
+// collectSites returns the union of call sites authored by any function
+// in the closure. Stable order is achieved by sorting closure FQNs first
+// and preserving each function's own site order.
+func collectSites(g *callgraph.Graph, closure map[callgraph.FQN]bool) []*callgraph.CallSite {
+	fqns := make([]callgraph.FQN, 0, len(closure))
+	for fqn := range closure {
+		fqns = append(fqns, fqn)
+	}
+	sort.Slice(fqns, func(i, j int) bool { return fqns[i] < fqns[j] })
+	var out []*callgraph.CallSite
+	for _, fqn := range fqns {
+		out = append(out, g.Calls[fqn]...)
+	}
 	return out
 }
 
@@ -102,14 +234,19 @@ func siteOf(c *callgraph.CallSite) FindingSite {
 	}
 }
 
-// matcherMatchesAny reports whether at least one site in sites matches m.
-func matcherMatchesAny(m policy.Matcher, sites []*callgraph.CallSite) bool {
+// firstMatch returns the first call site in sites that matches m, or nil.
+func firstMatch(m policy.Matcher, sites []*callgraph.CallSite) *callgraph.CallSite {
 	for _, s := range sites {
 		if matcherMatches(m, s) {
-			return true
+			return s
 		}
 	}
-	return false
+	return nil
+}
+
+// matcherMatchesAny reports whether at least one site in sites matches m.
+func matcherMatchesAny(m policy.Matcher, sites []*callgraph.CallSite) bool {
+	return firstMatch(m, sites) != nil
 }
 
 // matcherMatches reports whether the matcher's any_of disjunction matches
@@ -152,16 +289,4 @@ func callsMatches(pattern string, site *callgraph.CallSite) bool {
 	// Also try the unresolved raw text — useful when the import map could
 	// not resolve the callee but the policy uses the project-relative name.
 	return site.Raw == pattern
-}
-
-// functionHasGuardDecorator reports whether the function with the given
-// FQN has a decorator matching one of m's has_decorator predicates.
-//
-// TODO: decorators are not yet extracted by the call graph builder; this
-// always returns false. Once decorators are tracked on FuncNode, wire
-// them through here.
-func functionHasGuardDecorator(g *callgraph.Graph, _ callgraph.FQN, m policy.Matcher) bool {
-	_ = g
-	_ = m
-	return false
 }

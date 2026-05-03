@@ -36,12 +36,13 @@ run_case() {
 
 for policy_dir in "$FIXTURES_ROOT"/*/; do
   name="$(basename "$policy_dir")"
-  if [[ -d "$policy_dir/compliant" ]]; then
-    run_case "$name compliant" 0 "$policy_dir/compliant"
-  fi
-  if [[ -d "$policy_dir/violating" ]]; then
-    run_case "$name violating" 1 "$policy_dir/violating"
-  fi
+  for sub in "$policy_dir"*/; do
+    sub_name="$(basename "$sub")"
+    case "$sub_name" in
+      compliant*) run_case "$name $sub_name" 0 "$sub" ;;
+      violating*) run_case "$name $sub_name" 1 "$sub" ;;
+    esac
+  done
 done
 
 echo
