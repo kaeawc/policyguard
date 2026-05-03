@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/kaeawc/policyguard/internal/callgraph"
+	"github.com/kaeawc/policyguard/internal/engine"
+	"github.com/kaeawc/policyguard/internal/policy"
 	"github.com/kaeawc/policyguard/internal/scanner"
 )
 
@@ -29,6 +31,8 @@ func Run(ctx context.Context, version string, argv []string, stdout, stderr io.W
 		return runParse(ctx, rest, stdout, stderr)
 	case "callgraph":
 		return runCallgraph(ctx, rest, stdout, stderr)
+	case "check":
+		return runCheck(ctx, rest, stdout, stderr)
 	case "version", "-v", "--version":
 		fmt.Fprintln(stdout, version)
 		return 0
@@ -47,6 +51,8 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  parse     [--lang LANG] FILE [FILE...]   Parse files and print AST root info.")
 	fmt.Fprintln(w, "  callgraph [--lang LANG] DIR              Build a call graph for a directory.")
+	fmt.Fprintln(w, "  check     --policies DIR [--lang LANG] DIR")
+	fmt.Fprintln(w, "                                           Run policies against a source tree; exit 1 on findings.")
 	fmt.Fprintln(w, "  version                                  Print the policyguard version.")
 }
 
@@ -108,6 +114,134 @@ func runCallgraph(ctx context.Context, argv []string, stdout, stderr io.Writer) 
 	}
 	dumpGraph(stdout, g)
 	return 0
+}
+
+// stringSlice is a flag.Value that collects repeated occurrences of a flag.
+type stringSlice []string
+
+func (s *stringSlice) String() string     { return strings.Join(*s, ",") }
+func (s *stringSlice) Set(v string) error { *s = append(*s, v); return nil }
+
+func runCheck(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
+	fset := flag.NewFlagSet("check", flag.ContinueOnError)
+	fset.SetOutput(stderr)
+	lang := fset.String("lang", "python", "source language (python)")
+	policiesDir := fset.String("policies", "", "directory containing policy YAML files")
+	var policyFiles stringSlice
+	fset.Var(&policyFiles, "policy", "single policy file (repeatable)")
+	if err := fset.Parse(argv); err != nil {
+		return 2
+	}
+	dirs := fset.Args()
+	if len(dirs) != 1 {
+		fmt.Fprintln(stderr, "usage: policyguard check --policies DIR | --policy FILE [...] [--lang LANG] DIR")
+		return 2
+	}
+	if *policiesDir == "" && len(policyFiles) == 0 {
+		fmt.Fprintln(stderr, "policyguard: --policies or --policy is required")
+		return 2
+	}
+
+	policies, err := loadPolicies(*policiesDir, policyFiles)
+	if err != nil {
+		fmt.Fprintf(stderr, "policyguard: %v\n", err)
+		return 2
+	}
+	if len(policies) == 0 {
+		fmt.Fprintln(stderr, "policyguard: no policies loaded")
+		return 2
+	}
+
+	srcRoot := dirs[0]
+	files, err := loadSourceDir(ctx, srcRoot, scanner.Language(*lang))
+	if err != nil {
+		fmt.Fprintf(stderr, "policyguard: %v\n", err)
+		return 1
+	}
+
+	var g *callgraph.Graph
+	switch scanner.Language(*lang) {
+	case scanner.LangPython:
+		g = callgraph.BuildPython(files, srcRoot)
+	default:
+		fmt.Fprintf(stderr, "policyguard: check not implemented for %s\n", *lang)
+		return 1
+	}
+
+	var allFindings []engine.Finding
+	for _, p := range policies {
+		if !policyAppliesToLang(p, scanner.Language(*lang)) {
+			continue
+		}
+		allFindings = append(allFindings, engine.Analyze(g, p)...)
+	}
+	printFindings(stdout, allFindings)
+	if len(allFindings) > 0 {
+		return 1
+	}
+	return 0
+}
+
+func loadPolicies(dir string, files []string) ([]*policy.Policy, error) {
+	var out []*policy.Policy
+	if dir != "" {
+		ps, err := policy.LoadDir(dir)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ps...)
+	}
+	seen := make(map[string]string, len(out))
+	for _, p := range out {
+		seen[p.ID] = "from --policies"
+	}
+	for _, f := range files {
+		p, err := policy.Load(f)
+		if err != nil {
+			return nil, err
+		}
+		if prev, ok := seen[p.ID]; ok {
+			return nil, fmt.Errorf("duplicate policy id %q (%s and %s)", p.ID, prev, f)
+		}
+		seen[p.ID] = f
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func policyAppliesToLang(p *policy.Policy, lang scanner.Language) bool {
+	for _, l := range p.Languages {
+		if string(l) == string(lang) {
+			return true
+		}
+	}
+	return false
+}
+
+func printFindings(w io.Writer, findings []engine.Finding) {
+	if len(findings) == 0 {
+		fmt.Fprintln(w, "no findings")
+		return
+	}
+	for _, f := range findings {
+		fmt.Fprintf(w, "%s:%d: [%s] %s: %s -> %s\n  in %s; sink at %s:%d\n",
+			f.Source.Path, f.Source.Line,
+			f.Severity, f.PolicyID,
+			f.Source.Callee, f.Sink.Callee,
+			f.Function, f.Sink.Path, f.Sink.Line)
+	}
+	fmt.Fprintf(w, "\n%d finding(s)\n", len(findings))
+}
+
+func loadSourceDir(ctx context.Context, root string, lang scanner.Language) ([]*scanner.File, error) {
+	files, err := loadDir(ctx, root, lang)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no %s files under %s", lang, root)
+	}
+	return files, nil
 }
 
 func loadDir(ctx context.Context, root string, lang scanner.Language) ([]*scanner.File, error) {

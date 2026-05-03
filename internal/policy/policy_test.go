@@ -1,10 +1,49 @@
 package policy
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestLoadDir(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.yaml", minimal("policy-a"))
+	write("b.yml", minimal("policy-b"))
+	write("ignore.txt", "not a policy")
+
+	policies, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if len(policies) != 2 {
+		t.Fatalf("len(policies) = %d, want 2", len(policies))
+	}
+	if policies[0].ID != "policy-a" || policies[1].ID != "policy-b" {
+		t.Errorf("ids = %q, %q", policies[0].ID, policies[1].ID)
+	}
+}
+
+func TestLoadDir_DuplicateID(t *testing.T) {
+	dir := t.TempDir()
+	body := minimal("dup")
+	if err := os.WriteFile(filepath.Join(dir, "a.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadDir(dir)
+	if err == nil || !strings.Contains(err.Error(), "duplicate policy id") {
+		t.Fatalf("LoadDir: expected duplicate-id error, got %v", err)
+	}
+}
 
 func TestLoad_Valid(t *testing.T) {
 	p, err := Load(filepath.Join("testdata", "valid_pii_redaction.yaml"))
