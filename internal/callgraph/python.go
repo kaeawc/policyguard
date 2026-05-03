@@ -85,10 +85,30 @@ func (e *pyExtractor) walk(n *sitter.Node) {
 	case "call":
 		e.handleCall(n)
 		// fall through to recurse into args (which may contain nested calls)
+	case "attribute":
+		// Record attribute reads (e.g. user.email). Skip when this
+		// attribute is the function child of a call expression — those
+		// are already captured as call sites.
+		if !pyAttrIsCallFunction(n) {
+			e.handleFieldAccess(n)
+		}
+		// Still recurse so nested attributes/calls in `a.b.c` are seen.
 	}
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		e.walk(n.NamedChild(i))
 	}
+}
+
+// pyAttrIsCallFunction reports whether n is the `function` field of an
+// enclosing call node — i.e. `obj.method` in `obj.method(...)`. Walks up
+// at most one parent.
+func pyAttrIsCallFunction(n *sitter.Node) bool {
+	parent := n.Parent()
+	if parent == nil || parent.Type() != "call" {
+		return false
+	}
+	fn := parent.ChildByFieldName("function")
+	return fn != nil && fn == n
 }
 
 // handleDecorated walks a decorated_definition: collect decorators, then
@@ -237,6 +257,22 @@ func (e *pyExtractor) handleFunction(n *sitter.Node, decorators []string) {
 			e.walk(body.NamedChild(i))
 		}
 	}
+}
+
+func (e *pyExtractor) handleFieldAccess(n *sitter.Node) {
+	// attribute: { object: <expr>, attribute: identifier }
+	attr := n.ChildByFieldName("attribute")
+	if attr == nil {
+		return
+	}
+	e.g.AddField(&FieldAccess{
+		Caller: e.curFunc,
+		Field:  e.text(attr),
+		Path:   e.text(n),
+		File:   e.file,
+		Node:   n,
+		Line:   int(n.StartPoint().Row) + 1,
+	})
 }
 
 func (e *pyExtractor) handleCall(n *sitter.Node) {

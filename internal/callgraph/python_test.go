@@ -120,6 +120,40 @@ func equalStrSlice(a, b []string) bool {
 	return true
 }
 
+func TestBuildPython_ExtractsFieldAccess(t *testing.T) {
+	src := []byte(`def f(user):
+    e = user.email          # read — should be captured
+    user.method()           # call — NOT a field-access site
+    log(user.profile.name)  # nested read inside call args
+`)
+	file, err := scanner.ParseBytes(context.Background(), "x.py", scanner.LangPython, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := BuildPython([]*scanner.File{file}, "")
+
+	const fn FQN = "x.f"
+	fields := g.Fields[fn]
+	if len(fields) == 0 {
+		t.Fatalf("no field accesses captured")
+	}
+
+	wantFields := map[string]bool{"email": false, "name": false, "profile": false}
+	for _, f := range fields {
+		if _, ok := wantFields[f.Field]; ok {
+			wantFields[f.Field] = true
+		}
+		if f.Field == "method" {
+			t.Errorf("call function %q should not appear as field access", f.Path)
+		}
+	}
+	for k, seen := range wantFields {
+		if !seen {
+			t.Errorf("missing expected field %q in %+v", k, fields)
+		}
+	}
+}
+
 func TestPythonModuleFQN(t *testing.T) {
 	tests := []struct {
 		path, root string

@@ -23,7 +23,8 @@ import (
 // Examples: "app.handlers.fetch", "app.models.User.save", "anthropic.messages.create".
 type FQN string
 
-// Graph holds all functions and call edges discovered across a set of files.
+// Graph holds all functions, call edges, and attribute reads discovered
+// across a set of files.
 type Graph struct {
 	// Funcs is keyed by FQN. Includes only project-defined functions.
 	Funcs map[FQN]*FuncNode
@@ -31,13 +32,19 @@ type Graph struct {
 	// preserves source order. A call site whose caller is the empty FQN
 	// originates at module scope.
 	Calls map[FQN][]*CallSite
+	// Fields collects every attribute/member-expression read site,
+	// indexed by caller FQN. Attribute accesses that are themselves the
+	// callee of a call site are NOT included here (they're already
+	// represented in Calls), so a single `obj.method()` shows up once.
+	Fields map[FQN][]*FieldAccess
 }
 
 // NewGraph returns an empty graph.
 func NewGraph() *Graph {
 	return &Graph{
-		Funcs: make(map[FQN]*FuncNode),
-		Calls: make(map[FQN][]*CallSite),
+		Funcs:  make(map[FQN]*FuncNode),
+		Calls:  make(map[FQN][]*CallSite),
+		Fields: make(map[FQN][]*FieldAccess),
 	}
 }
 
@@ -73,6 +80,21 @@ type CallSite struct {
 	Line int
 }
 
+// FieldAccess records a single attribute read like `user.email`.
+type FieldAccess struct {
+	// Caller is the FQN of the enclosing function, or "" for module scope.
+	Caller FQN
+	// Field is just the attribute name (`email` for `user.email`).
+	Field string
+	// Path is the full expression text as it appears in source
+	// (`user.email`, `request.user.email`, etc.). Useful for exact-path
+	// matchers.
+	Path string
+	File *scanner.File
+	Node *sitter.Node
+	Line int
+}
+
 // AddFunc registers a function definition. Duplicate FQNs overwrite — Python
 // allows redefinition, and we keep the latest.
 func (g *Graph) AddFunc(fn *FuncNode) {
@@ -82,4 +104,9 @@ func (g *Graph) AddFunc(fn *FuncNode) {
 // AddCall appends a call site under its caller key.
 func (g *Graph) AddCall(c *CallSite) {
 	g.Calls[c.Caller] = append(g.Calls[c.Caller], c)
+}
+
+// AddField appends a field-access site under its caller key.
+func (g *Graph) AddField(f *FieldAccess) {
+	g.Fields[f.Caller] = append(g.Fields[f.Caller], f)
 }

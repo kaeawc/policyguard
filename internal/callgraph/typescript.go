@@ -95,6 +95,12 @@ func (e *tsExtractor) walk(n *sitter.Node) {
 	case "call_expression":
 		e.handleCall(n)
 		// fall through to recurse into args
+	case "member_expression":
+		// Attribute read like `user.email`. Skip when this is the
+		// function child of a call_expression — those are call sites.
+		if !tsMemberIsCallFunction(n) {
+			e.handleFieldAccess(n)
+		}
 	}
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		e.walk(n.NamedChild(i))
@@ -338,6 +344,31 @@ func (e *tsExtractor) recordAndRecurse(defNode *sitter.Node, funcName string) {
 	}
 	// Expression body (concise arrow): walk the expression itself.
 	e.walk(body)
+}
+
+func tsMemberIsCallFunction(n *sitter.Node) bool {
+	parent := n.Parent()
+	if parent == nil || parent.Type() != "call_expression" {
+		return false
+	}
+	fn := parent.ChildByFieldName("function")
+	return fn != nil && fn == n
+}
+
+func (e *tsExtractor) handleFieldAccess(n *sitter.Node) {
+	// member_expression: object + property (property_identifier).
+	prop := n.ChildByFieldName("property")
+	if prop == nil {
+		return
+	}
+	e.g.AddField(&FieldAccess{
+		Caller: e.curFunc,
+		Field:  e.text(prop),
+		Path:   e.text(n),
+		File:   e.file,
+		Node:   n,
+		Line:   int(n.StartPoint().Row) + 1,
+	})
 }
 
 func (e *tsExtractor) handleCall(n *sitter.Node) {
