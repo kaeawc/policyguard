@@ -1,0 +1,45 @@
+# Self-test the composite action against this repo's own fixtures.
+# Exercises both the green path (compliant fixture, action exits 0) and
+# the red path (violating fixture with fail-on-findings=false, action
+# completes successfully and writes the markdown findings file).
+#
+# Comment posting is disabled here so the workflow doesn't spam its own
+# PRs; production usage is exercised by consumers via `kaeawc/policyguard@<ref>`.
+name: action-self-test
+
+on:
+  push:
+    branches:
+      - '*'
+  pull_request:
+    branches:
+      - '*'
+
+permissions:
+  contents: read
+
+jobs:
+  compliant:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: policyguard (compliant fixture, expect exit 0)
+        uses: ./
+        with:
+          policies-dir: examples/policies
+          source-dir: tests/fixtures/python/policies/pii_redaction_before_llm/compliant
+          comment-on-pr: 'false'
+
+  violating:
+    # Inverts the contract: we expect policyguard to FAIL with the
+    # fixture, and the workflow step is considered green when it does.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: policyguard (violating fixture, fail-on-findings=false)
+        uses: ./
+        with:
+          policies-dir: examples/policies
+          source-dir: tests/fixtures/python/policies/pii_redaction_before_llm/violating
+          fail-on-findings: 'false'
+          comment-on-pr: 'false'

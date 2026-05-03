@@ -1,0 +1,121 @@
+name: policyguard
+description: >
+  Run policyguard policies against a source tree and (optionally) post the
+  findings as a PR comment. The same Go binary is used as `policyguard
+  check` locally — the action just wraps build + run + comment.
+author: kaeawc
+branding:
+  icon: shield
+  color: red
+inputs:
+  policies-dir:
+    description: Directory containing policy YAML files.
+    required: true
+  source-dir:
+    description: Source tree to analyze.
+    required: true
+  lang:
+    description: Source language (python | typescript).
+    required: false
+    default: python
+  fail-on-findings:
+    description: >
+      If "true" (default), the step fails when policyguard reports any
+      findings. Set to "false" to surface findings via the PR comment
+      while keeping the workflow green.
+    required: false
+    default: 'true'
+  comment-on-pr:
+    description: >
+      Post findings as a PR comment. Has no effect outside a
+      pull_request event. The action looks for an existing comment with
+      a hidden marker line and updates it in place; otherwise it
+      creates a new comment.
+    required: false
+    default: 'true'
+  github-token:
+    description: Token used for the PR-comment API calls. Defaults to GITHUB_TOKEN.
+    required: false
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: 'stable'
+
+    - name: Install policyguard
+      shell: bash
+      env:
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        # When invoked via `uses: ./` from the policyguard repo itself,
+        # build from the local checkout — there's no useful action_ref
+        # in that case, and a `go install ...@main` would test the
+        # already-released code instead of the PR under review.
+        if [[ -f "$ACTION_PATH/cmd/policyguard/main.go" ]]; then
+          echo "Building policyguard from local checkout: $ACTION_PATH"
+          (cd "$ACTION_PATH" && GOBIN="$RUNNER_TEMP/policyguard-bin" go install ./cmd/policyguard)
+        else
+          ref="${ACTION_REF:-main}"
+          echo "Installing policyguard@$ref"
+          GOBIN="$RUNNER_TEMP/policyguard-bin" go install "github.com/kaeawc/policyguard/cmd/policyguard@$ref"
+        fi
+        echo "$RUNNER_TEMP/policyguard-bin" >> "$GITHUB_PATH"
+
+    - name: Run policyguard
+      id: run
+      shell: bash
+      env:
+        POLICIES_DIR: ${{ inputs.policies-dir }}
+        SOURCE_DIR: ${{ inputs.source-dir }}
+        LANG: ${{ inputs.lang }}
+      run: |
+        set +e
+        out="$RUNNER_TEMP/policyguard-findings.md"
+        # Hidden marker so we can find/update an existing comment.
+        printf '<!-- policyguard-action -->\n' > "$out"
+        policyguard check \
+          --policies "$POLICIES_DIR" \
+          --lang "$LANG" \
+          --format markdown \
+          "$SOURCE_DIR" >> "$out"
+        code=$?
+        echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+        echo "findings_file=$out" >> "$GITHUB_OUTPUT"
+        cat "$out"
+        exit 0
+
+    - name: Post PR comment
+      if: ${{ inputs.comment-on-pr == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        FINDINGS: ${{ steps.run.outputs.findings_file }}
+      run: |
+        existing=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+          --paginate \
+          --jq '.[] | select(.body | startswith("<!-- policyguard-action -->")) | .id' | head -n1)
+        if [[ -n "$existing" ]]; then
+          echo "Updating existing comment $existing"
+          gh api -X PATCH "repos/$REPO/issues/comments/$existing" \
+            -f body="$(cat "$FINDINGS")" >/dev/null
+        else
+          echo "Posting new comment"
+          gh pr comment "$PR_NUMBER" --body-file "$FINDINGS" >/dev/null
+        fi
+
+    - name: Enforce findings policy
+      shell: bash
+      env:
+        EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+      run: |
+        if [[ "$FAIL_ON_FINDINGS" == "true" && "$EXIT_CODE" != "0" ]]; then
+          echo "policyguard exited $EXIT_CODE (fail-on-findings=true)" >&2
+          exit "$EXIT_CODE"
+        fi
