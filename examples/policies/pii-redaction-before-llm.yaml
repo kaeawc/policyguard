@@ -1,0 +1,23 @@
+# PII redaction before LLM
+#
+# Any codepath that loads a user record (or other PII source) and reaches
+# an LLM API must pass through a redactor first. The MVP `calls` matcher
+# is exact-or-prefix; field_access and has_decorator predicates are listed
+# for documentation but are not yet evaluated by the engine.
+id: pii-redaction-before-llm
+severity: error
+languages: [python]
+source:
+  any_of:
+    - calls: app.handlers.load_user
+    - calls: user_repo.get_user
+    - calls: session.current_user
+sink:
+  any_of:
+    - calls: anthropic.messages.create
+    - calls: openai.chat.completions.create
+guard:
+  any_of:
+    - calls: redactor.redact
+    - calls: app.redactor.redact
+message: User PII reaches LLM call without passing through redactor.
