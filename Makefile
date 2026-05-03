@@ -1,4 +1,4 @@
-.PHONY: build test vet lint fmt complexity security tidy ci clean all
+.PHONY: build test vet lint fmt complexity security tidy ci clean all check-fixtures
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS = -s -w -X main.version=$(VERSION)
@@ -34,3 +34,6 @@ clean:
 	rm -f $(BIN) junit-report.xml gosec-report.xml
 
 all: build vet test
+
+check-fixtures: build
+	BIN=./$(BIN) bash scripts/check-fixtures.sh
