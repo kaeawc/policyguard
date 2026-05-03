@@ -128,6 +128,23 @@ func TestExample_PIIRedactionBeforeLLM(t *testing.T) {
 			t.Errorf("Function = %q, want contains summarize_user", got.Function)
 		}
 	})
+
+	t.Run("violating_interprocedural", func(t *testing.T) {
+		// Source in get_user, sink in call_llm, no guard anywhere.
+		// fetch_summary is the common ancestor whose closure spans both.
+		fix := filepath.Join(root, "tests/fixtures/python/policies/pii_redaction_before_llm/violating_interprocedural")
+		findings := runPipeline(t, fix, p)
+		if len(findings) != 1 {
+			t.Fatalf("findings = %d, want 1: %+v", len(findings), findings)
+		}
+		got := findings[0]
+		if !strings.Contains(string(got.Function), "fetch_summary") {
+			t.Errorf("Function = %q, want contains fetch_summary", got.Function)
+		}
+		if string(got.Sink.Callee) != "anthropic.messages.create" {
+			t.Errorf("Sink.Callee = %q", got.Sink.Callee)
+		}
+	})
 }
 
 func TestExample_LogUserMustRedact(t *testing.T) {
