@@ -11,7 +11,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -108,6 +111,42 @@ func Load(path string) (*Policy, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return p, nil
+}
+
+// LoadDir loads every `*.yaml` and `*.yml` file under root (non-recursive)
+// as a policy. Files are loaded in lexical order so callers see a stable
+// policy ordering.
+func LoadDir(root string) ([]*Policy, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("read dir %s: %w", root, err)
+	}
+	var paths []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+			continue
+		}
+		paths = append(paths, filepath.Join(root, name))
+	}
+	sort.Strings(paths)
+	out := make([]*Policy, 0, len(paths))
+	seen := make(map[string]string, len(paths))
+	for _, path := range paths {
+		p, err := Load(path)
+		if err != nil {
+			return nil, err
+		}
+		if prev, ok := seen[p.ID]; ok {
+			return nil, fmt.Errorf("duplicate policy id %q in %s and %s", p.ID, prev, path)
+		}
+		seen[p.ID] = path
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 // Parse reads YAML from r and validates the resulting policy.
