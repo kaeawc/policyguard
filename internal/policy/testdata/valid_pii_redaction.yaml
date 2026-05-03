@@ -1,0 +1,17 @@
+id: pii-redaction-before-llm
+severity: error
+languages: [python, typescript, go]
+source:
+  any_of:
+    - calls: "user_repo.get_user"
+    - calls: "session.current_user"
+    - field_access: "*.email"
+sink:
+  any_of:
+    - calls: "anthropic.messages.create"
+    - calls: "openai.chat.completions.create"
+guard:
+  any_of:
+    - calls: "redactor.redact"
+    - has_decorator: "@redacted"
+message: "User PII reaches LLM call without passing through redactor."

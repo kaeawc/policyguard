@@ -1,0 +1,193 @@
+package policy
+
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestLoad_Valid(t *testing.T) {
+	p, err := Load(filepath.Join("testdata", "valid_pii_redaction.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if p.ID != "pii-redaction-before-llm" {
+		t.Errorf("ID = %q", p.ID)
+	}
+	if p.Severity != SeverityError {
+		t.Errorf("Severity = %q", p.Severity)
+	}
+	if got := len(p.Languages); got != 3 {
+		t.Errorf("len(Languages) = %d, want 3", got)
+	}
+	if got := len(p.Source.AnyOf); got != 3 {
+		t.Errorf("len(Source.AnyOf) = %d, want 3", got)
+	}
+	if p.Source.AnyOf[2].Kind() != "field_access" {
+		t.Errorf("Source.AnyOf[2].Kind() = %q, want field_access", p.Source.AnyOf[2].Kind())
+	}
+	if p.Guard.AnyOf[1].HasDecorator != "@redacted" {
+		t.Errorf("Guard.AnyOf[1].HasDecorator = %q", p.Guard.AnyOf[1].HasDecorator)
+	}
+}
+
+func TestParse_Errors(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantSub string
+	}{
+		{
+			name:    "missing id",
+			yaml:    minimal(""),
+			wantSub: "id: required",
+		},
+		{
+			name:    "bad id chars",
+			yaml:    minimal("BadID"),
+			wantSub: "must match",
+		},
+		{
+			name: "bad severity",
+			yaml: `
+id: x
+severity: catastrophic
+languages: [python]
+source: {any_of: [{calls: a}]}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+message: m
+`,
+			wantSub: "severity",
+		},
+		{
+			name: "no languages",
+			yaml: `
+id: x
+severity: error
+languages: []
+source: {any_of: [{calls: a}]}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+message: m
+`,
+			wantSub: "languages",
+		},
+		{
+			name: "unknown language",
+			yaml: `
+id: x
+severity: error
+languages: [cobol]
+source: {any_of: [{calls: a}]}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+message: m
+`,
+			wantSub: "supported language",
+		},
+		{
+			name: "empty source",
+			yaml: `
+id: x
+severity: error
+languages: [python]
+source: {any_of: []}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+message: m
+`,
+			wantSub: "source.any_of",
+		},
+		{
+			name: "predicate two kinds",
+			yaml: `
+id: x
+severity: error
+languages: [python]
+source: {any_of: [{calls: a, has_decorator: "@b"}]}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+message: m
+`,
+			wantSub: "exactly one matcher",
+		},
+		{
+			name: "predicate empty",
+			yaml: `
+id: x
+severity: error
+languages: [python]
+source: {any_of: [{}]}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+message: m
+`,
+			wantSub: "predicate is empty",
+		},
+		{
+			name: "missing message",
+			yaml: `
+id: x
+severity: error
+languages: [python]
+source: {any_of: [{calls: a}]}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+`,
+			wantSub: "message",
+		},
+		{
+			name: "unknown field",
+			yaml: `
+id: x
+severity: error
+languages: [python]
+extras: nope
+source: {any_of: [{calls: a}]}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+message: m
+`,
+			wantSub: "extras",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(strings.NewReader(tc.yaml))
+			if err == nil {
+				t.Fatalf("Parse: expected error containing %q, got nil", tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("Parse error = %q, want substring %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestPredicate_KindAndValue(t *testing.T) {
+	p := Predicate{Calls: "x.y"}
+	if p.Kind() != "calls" || p.Value() != "x.y" {
+		t.Errorf("calls predicate: kind=%q value=%q", p.Kind(), p.Value())
+	}
+	p = Predicate{HasDecorator: "@auth"}
+	if p.Kind() != "has_decorator" || p.Value() != "@auth" {
+		t.Errorf("decorator predicate: kind=%q value=%q", p.Kind(), p.Value())
+	}
+	p = Predicate{}
+	if p.Kind() != "" || p.Value() != "" {
+		t.Errorf("empty predicate: kind=%q value=%q", p.Kind(), p.Value())
+	}
+}
+
+func minimal(id string) string {
+	return `
+id: ` + id + `
+severity: error
+languages: [python]
+source: {any_of: [{calls: a}]}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+message: m
+`
+}
