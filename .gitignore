@@ -1,0 +1,25 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Coverage output
+*.out
+
+# Test reports
+*report.xml
+
+# Go workspace
+go.work
+go.work.sum
+
+# Local binary outputs
+/policyguard
+/dist/
+
+.claude/
