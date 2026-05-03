@@ -84,6 +84,47 @@ export function f() { return logger.info('hi'); }
 	}
 }
 
+func TestBuildTypeScript_ArrowFunctionBinding(t *testing.T) {
+	src := `import { redact } from './redactor';
+
+const summarize = (u: any) => redact(u);
+`
+	g := BuildTypeScript([]*scanner.File{parseTS(t, src)}, "")
+	if _, ok := g.Funcs["x.summarize"]; !ok {
+		t.Fatalf("missing x.summarize; have %v", funcKeys(g))
+	}
+	calls := g.Calls["x.summarize"]
+	if len(calls) != 1 || string(calls[0].Callee) != "./redactor.redact" {
+		t.Errorf("calls = %+v", calls)
+	}
+}
+
+func TestBuildTypeScript_FunctionExpressionBinding(t *testing.T) {
+	src := `import { redact } from './redactor';
+
+const summarize = function (u) { return redact(u); };
+`
+	g := BuildTypeScript([]*scanner.File{parseTS(t, src)}, "")
+	if _, ok := g.Funcs["x.summarize"]; !ok {
+		t.Fatalf("missing x.summarize; have %v", funcKeys(g))
+	}
+	calls := g.Calls["x.summarize"]
+	if len(calls) != 1 || string(calls[0].Callee) != "./redactor.redact" {
+		t.Errorf("calls = %+v", calls)
+	}
+}
+
+func TestBuildTypeScript_ExportedArrowFunction(t *testing.T) {
+	src := `import { redact } from './redactor';
+
+export const summarize = (u: any) => redact(u);
+`
+	g := BuildTypeScript([]*scanner.File{parseTS(t, src)}, "")
+	if _, ok := g.Funcs["x.summarize"]; !ok {
+		t.Fatalf("missing x.summarize (export const arrow); have %v", funcKeys(g))
+	}
+}
+
 func TestBuildTypeScript_ClassMethod(t *testing.T) {
 	src := `class Foo {
   bar() { return baz(); }
