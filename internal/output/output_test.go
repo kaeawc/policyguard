@@ -1,0 +1,196 @@
+package output
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/kaeawc/policyguard/internal/callgraph"
+	"github.com/kaeawc/policyguard/internal/engine"
+	"github.com/kaeawc/policyguard/internal/policy"
+)
+
+func sampleFindings() []engine.Finding {
+	return []engine.Finding{{
+		PolicyID: "pii-redaction-before-llm",
+		Severity: policy.SeverityError,
+		Message:  "User PII reaches LLM call.",
+		Function: callgraph.FQN("svc.handler.fetch"),
+		Source: engine.FindingSite{
+			Callee: callgraph.FQN("user_repo.get_user"),
+			Path:   "svc/handler.py",
+			Line:   2,
+		},
+		Sink: engine.FindingSite{
+			Callee: callgraph.FQN("anthropic.messages.create"),
+			Path:   "svc/handler.py",
+			Line:   3,
+		},
+	}}
+}
+
+func samplePolicies() []*policy.Policy {
+	return []*policy.Policy{{
+		ID:        "pii-redaction-before-llm",
+		Severity:  policy.SeverityError,
+		Languages: []policy.Language{policy.LangPython},
+		Source:    policy.Matcher{AnyOf: []policy.Predicate{{Calls: "user_repo.get_user"}}},
+		Sink:      policy.Matcher{AnyOf: []policy.Predicate{{Calls: "anthropic.messages.create"}}},
+		Guard:     policy.Matcher{AnyOf: []policy.Predicate{{Calls: "redactor.redact"}}},
+		Message:   "User PII reaches LLM call.",
+	}}
+}
+
+func TestRender_TextEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatText, Args{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := buf.String(); !strings.Contains(got, "no findings") {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestRender_TextWithFindings(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatText, Args{Findings: sampleFindings()}); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{
+		"svc/handler.py:2:",
+		"[error]",
+		"pii-redaction-before-llm",
+		"user_repo.get_user -> anthropic.messages.create",
+		"in svc.handler.fetch",
+		"sink at svc/handler.py:3",
+		"1 finding(s)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("text output missing %q\nhad:\n%s", want, got)
+		}
+	}
+}
+
+func TestRender_JSONStructure(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatJSON, Args{Findings: sampleFindings()}); err != nil {
+		t.Fatal(err)
+	}
+	var got []jsonFinding
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d", len(got))
+	}
+	f := got[0]
+	if f.PolicyID != "pii-redaction-before-llm" || f.Severity != policy.SeverityError {
+		t.Errorf("unexpected fields: %+v", f)
+	}
+	if f.Source.Path != "svc/handler.py" || f.Source.Line != 2 {
+		t.Errorf("unexpected source: %+v", f.Source)
+	}
+	if f.Sink.Callee != "anthropic.messages.create" || f.Sink.Line != 3 {
+		t.Errorf("unexpected sink: %+v", f.Sink)
+	}
+}
+
+func TestRender_JSONEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatJSON, Args{}); err != nil {
+		t.Fatal(err)
+	}
+	var got []jsonFinding
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d findings, want 0", len(got))
+	}
+}
+
+func TestRender_SARIFStructure(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatSARIF, Args{
+		Findings: sampleFindings(),
+		Policies: samplePolicies(),
+		Version:  "v1.2.3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var got sarifLog
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, buf.String())
+	}
+	if got.Version != "2.1.0" {
+		t.Errorf("Version = %q", got.Version)
+	}
+	if len(got.Runs) != 1 {
+		t.Fatalf("Runs = %d", len(got.Runs))
+	}
+	run := got.Runs[0]
+	if run.Tool.Driver.Name != "policyguard" || run.Tool.Driver.Version != "v1.2.3" {
+		t.Errorf("driver = %+v", run.Tool.Driver)
+	}
+	if len(run.Tool.Driver.Rules) != 1 {
+		t.Errorf("Rules = %d, want 1", len(run.Tool.Driver.Rules))
+	}
+	if run.Tool.Driver.Rules[0].ID != "pii-redaction-before-llm" {
+		t.Errorf("Rules[0].ID = %q", run.Tool.Driver.Rules[0].ID)
+	}
+	if len(run.Results) != 1 {
+		t.Fatalf("Results = %d", len(run.Results))
+	}
+	r := run.Results[0]
+	if r.RuleID != "pii-redaction-before-llm" || r.Level != "error" {
+		t.Errorf("result = %+v", r)
+	}
+	if len(r.Locations) != 1 || r.Locations[0].PhysicalLocation.Region.StartLine != 2 {
+		t.Errorf("source location wrong: %+v", r.Locations)
+	}
+	if len(r.RelatedLocations) != 1 || r.RelatedLocations[0].PhysicalLocation.Region.StartLine != 3 {
+		t.Errorf("sink (related) location wrong: %+v", r.RelatedLocations)
+	}
+}
+
+func TestRender_SARIFFallsBackToFindingsForRules(t *testing.T) {
+	var buf bytes.Buffer
+	// No policies passed in — the renderer must synthesize rules from the
+	// findings themselves so the output still validates.
+	if err := Render(&buf, FormatSARIF, Args{Findings: sampleFindings()}); err != nil {
+		t.Fatal(err)
+	}
+	var got sarifLog
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Runs[0].Tool.Driver.Rules) != 1 {
+		t.Errorf("expected 1 synthesized rule")
+	}
+}
+
+func TestRender_UnknownFormatErrors(t *testing.T) {
+	var buf bytes.Buffer
+	err := Render(&buf, Format("xml"), Args{})
+	if err == nil || !strings.Contains(err.Error(), "unknown output format") {
+		t.Errorf("expected unknown-format error, got %v", err)
+	}
+}
+
+func TestRender_SARIFLevelMapping(t *testing.T) {
+	tests := []struct {
+		sev  policy.Severity
+		want string
+	}{
+		{policy.SeverityError, "error"},
+		{policy.SeverityWarning, "warning"},
+		{policy.SeverityInfo, "note"},
+	}
+	for _, tc := range tests {
+		if got := sarifLevel(tc.sev); got != tc.want {
+			t.Errorf("sarifLevel(%q) = %q, want %q", tc.sev, got, tc.want)
+		}
+	}
+}

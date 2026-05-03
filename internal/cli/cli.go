@@ -14,9 +14,16 @@ import (
 
 	"github.com/kaeawc/policyguard/internal/callgraph"
 	"github.com/kaeawc/policyguard/internal/engine"
+	"github.com/kaeawc/policyguard/internal/output"
 	"github.com/kaeawc/policyguard/internal/policy"
 	"github.com/kaeawc/policyguard/internal/scanner"
 )
+
+// runChecker holds CLI dependencies that runCheck threads through to the
+// renderer (currently just the build version).
+type runChecker struct {
+	version string
+}
 
 // Run is the main entry point. argv excludes the program name. version is
 // the build-time version string injected via -ldflags.
@@ -32,7 +39,8 @@ func Run(ctx context.Context, version string, argv []string, stdout, stderr io.W
 	case "callgraph":
 		return runCallgraph(ctx, rest, stdout, stderr)
 	case "check":
-		return runCheck(ctx, rest, stdout, stderr)
+		c := &runChecker{version: version}
+		return c.runCheck(ctx, rest, stdout, stderr)
 	case "version", "-v", "--version":
 		fmt.Fprintln(stdout, version)
 		return 0
@@ -51,7 +59,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  parse     [--lang LANG] FILE [FILE...]   Parse files and print AST root info.")
 	fmt.Fprintln(w, "  callgraph [--lang LANG] DIR              Build a call graph for a directory.")
-	fmt.Fprintln(w, "  check     --policies DIR [--lang LANG] DIR")
+	fmt.Fprintln(w, "  check     --policies DIR [--lang LANG] [--format text|json|sarif] DIR")
 	fmt.Fprintln(w, "                                           Run policies against a source tree; exit 1 on findings.")
 	fmt.Fprintln(w, "  version                                  Print the policyguard version.")
 }
@@ -122,11 +130,12 @@ type stringSlice []string
 func (s *stringSlice) String() string     { return strings.Join(*s, ",") }
 func (s *stringSlice) Set(v string) error { *s = append(*s, v); return nil }
 
-func runCheck(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
+func (c *runChecker) runCheck(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
 	fset := flag.NewFlagSet("check", flag.ContinueOnError)
 	fset.SetOutput(stderr)
 	lang := fset.String("lang", "python", "source language (python)")
 	policiesDir := fset.String("policies", "", "directory containing policy YAML files")
+	format := fset.String("format", "text", "output format: text|json|sarif")
 	var policyFiles stringSlice
 	fset.Var(&policyFiles, "policy", "single policy file (repeatable)")
 	if err := fset.Parse(argv); err != nil {
@@ -152,34 +161,52 @@ func runCheck(ctx context.Context, argv []string, stdout, stderr io.Writer) int 
 		return 2
 	}
 
-	srcRoot := dirs[0]
-	files, err := loadSourceDir(ctx, srcRoot, scanner.Language(*lang))
-	if err != nil {
+	allFindings, applicable, code := c.runPipeline(ctx, dirs[0], scanner.Language(*lang), policies, stderr)
+	if code != 0 {
+		return code
+	}
+	if err := output.Render(stdout, output.Format(*format), output.Args{
+		Findings: allFindings,
+		Policies: applicable,
+		Version:  c.version,
+	}); err != nil {
 		fmt.Fprintf(stderr, "policyguard: %v\n", err)
-		return 1
+		return 2
 	}
-
-	var g *callgraph.Graph
-	switch scanner.Language(*lang) {
-	case scanner.LangPython:
-		g = callgraph.BuildPython(files, srcRoot)
-	default:
-		fmt.Fprintf(stderr, "policyguard: check not implemented for %s\n", *lang)
-		return 1
-	}
-
-	var allFindings []engine.Finding
-	for _, p := range policies {
-		if !policyAppliesToLang(p, scanner.Language(*lang)) {
-			continue
-		}
-		allFindings = append(allFindings, engine.Analyze(g, p)...)
-	}
-	printFindings(stdout, allFindings)
 	if len(allFindings) > 0 {
 		return 1
 	}
 	return 0
+}
+
+// runPipeline parses srcRoot, builds the call graph, and runs every
+// language-applicable policy through the engine. Returns the merged
+// findings, the applicable policies (for SARIF rules), and a non-zero
+// exit code on parse/build error.
+func (c *runChecker) runPipeline(ctx context.Context, srcRoot string, lang scanner.Language, policies []*policy.Policy, stderr io.Writer) ([]engine.Finding, []*policy.Policy, int) {
+	files, err := loadSourceDir(ctx, srcRoot, lang)
+	if err != nil {
+		fmt.Fprintf(stderr, "policyguard: %v\n", err)
+		return nil, nil, 1
+	}
+	var g *callgraph.Graph
+	switch lang {
+	case scanner.LangPython:
+		g = callgraph.BuildPython(files, srcRoot)
+	default:
+		fmt.Fprintf(stderr, "policyguard: check not implemented for %s\n", lang)
+		return nil, nil, 1
+	}
+	var allFindings []engine.Finding
+	var applicable []*policy.Policy
+	for _, p := range policies {
+		if !policyAppliesToLang(p, lang) {
+			continue
+		}
+		applicable = append(applicable, p)
+		allFindings = append(allFindings, engine.Analyze(g, p)...)
+	}
+	return allFindings, applicable, 0
 }
 
 func loadPolicies(dir string, files []string) ([]*policy.Policy, error) {
@@ -216,21 +243,6 @@ func policyAppliesToLang(p *policy.Policy, lang scanner.Language) bool {
 		}
 	}
 	return false
-}
-
-func printFindings(w io.Writer, findings []engine.Finding) {
-	if len(findings) == 0 {
-		fmt.Fprintln(w, "no findings")
-		return
-	}
-	for _, f := range findings {
-		fmt.Fprintf(w, "%s:%d: [%s] %s: %s -> %s\n  in %s; sink at %s:%d\n",
-			f.Source.Path, f.Source.Line,
-			f.Severity, f.PolicyID,
-			f.Source.Callee, f.Sink.Callee,
-			f.Function, f.Sink.Path, f.Sink.Line)
-	}
-	fmt.Fprintf(w, "\n%d finding(s)\n", len(findings))
 }
 
 func loadSourceDir(ctx context.Context, root string, lang scanner.Language) ([]*scanner.File, error) {
