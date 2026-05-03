@@ -84,7 +84,8 @@ func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 	violators := make(map[callgraph.FQN]Finding, 0)
 	for fqn := range g.Funcs {
 		sites := collectSites(g, closures[fqn])
-		f, ok := evaluate(p, sites, fqn)
+		decorators := collectDecorators(g, closures[fqn])
+		f, ok := evaluate(p, sites, decorators, fqn)
 		if !ok {
 			continue
 		}
@@ -120,24 +121,60 @@ func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 
 // analyzeModuleScope runs the original intra-procedural check on the
 // "<module>" caller bucket. Findings here are kept distinct because
-// closures don't apply at module scope.
+// closures don't apply at module scope. Module scope has no decorators.
 func analyzeModuleScope(g *callgraph.Graph, p *policy.Policy) []Finding {
 	sites := g.Calls[""]
 	if len(sites) == 0 {
 		return nil
 	}
-	f, ok := evaluate(p, sites, "")
+	f, ok := evaluate(p, sites, nil, "")
 	if !ok {
 		return nil
 	}
 	return []Finding{f}
 }
 
-// evaluate applies the source/guard/sink check to a call-site set. Returns
-// the finding (with caller substituted for display) and whether it
-// violates the policy.
-func evaluate(p *policy.Policy, sites []*callgraph.CallSite, caller callgraph.FQN) (Finding, bool) {
-	if matcherMatchesAny(p.Guard, sites) {
+// collectDecorators returns the union of decorator names across every
+// function in the closure. Order is stable (sorted by FQN).
+func collectDecorators(g *callgraph.Graph, closure map[callgraph.FQN]bool) []string {
+	fqns := make([]callgraph.FQN, 0, len(closure))
+	for fqn := range closure {
+		fqns = append(fqns, fqn)
+	}
+	sort.Slice(fqns, func(i, j int) bool { return fqns[i] < fqns[j] })
+	var out []string
+	for _, fqn := range fqns {
+		if fn, ok := g.Funcs[fqn]; ok {
+			out = append(out, fn.Decorators...)
+		}
+	}
+	return out
+}
+
+// matcherMatchesDecorators reports whether any has_decorator predicate in
+// m matches any decorator name in decorators. The policy value's leading
+// `@` is stripped before comparison.
+func matcherMatchesDecorators(m policy.Matcher, decorators []string) bool {
+	for _, pred := range m.AnyOf {
+		if pred.Kind() != "has_decorator" {
+			continue
+		}
+		want := strings.TrimPrefix(pred.HasDecorator, "@")
+		for _, dec := range decorators {
+			if dec == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// evaluate applies the source/guard/sink check to a call-site set plus
+// any decorators present on functions in the same closure. Returns the
+// finding (with caller substituted for display) and whether it violates
+// the policy.
+func evaluate(p *policy.Policy, sites []*callgraph.CallSite, decorators []string, caller callgraph.FQN) (Finding, bool) {
+	if matcherMatchesAny(p.Guard, sites) || matcherMatchesDecorators(p.Guard, decorators) {
 		return Finding{}, false
 	}
 	src := firstMatch(p.Source, sites)
@@ -260,10 +297,12 @@ func matcherMatches(m policy.Matcher, site *callgraph.CallSite) bool {
 	return false
 }
 
-// predicateMatchesSite is true if pred matches site. MVP supports only the
-// `calls` predicate (with optional trailing `.*` wildcard). `has_decorator`
-// and `field_access` always return false here; decorators are handled
-// separately at function granularity, and field_access is not yet wired.
+// predicateMatchesSite is true if pred matches site. The `calls`
+// predicate supports exact match plus trailing `.*` wildcard; the
+// `has_decorator` predicate is evaluated at function granularity (see
+// matcherMatchesDecorators) so it always returns false here. The
+// `field_access` predicate is not yet wired — the call graph builder
+// doesn't surface attribute reads.
 func predicateMatchesSite(pred policy.Predicate, site *callgraph.CallSite) bool {
 	switch pred.Kind() {
 	case "calls":

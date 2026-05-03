@@ -73,11 +73,14 @@ func (e *pyExtractor) walk(n *sitter.Node) {
 	case "import_from_statement":
 		e.handleImportFrom(n)
 		return
+	case "decorated_definition":
+		e.handleDecorated(n)
+		return
 	case "class_definition":
-		e.handleClass(n)
+		e.handleClass(n, nil)
 		return
 	case "function_definition":
-		e.handleFunction(n)
+		e.handleFunction(n, nil)
 		return
 	case "call":
 		e.handleCall(n)
@@ -86,6 +89,49 @@ func (e *pyExtractor) walk(n *sitter.Node) {
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		e.walk(n.NamedChild(i))
 	}
+}
+
+// handleDecorated walks a decorated_definition: collect decorators, then
+// recurse into the inner function or class with those decorators attached.
+func (e *pyExtractor) handleDecorated(n *sitter.Node) {
+	var decorators []string
+	var inner *sitter.Node
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		switch c.Type() {
+		case "decorator":
+			decorators = append(decorators, decoratorName(c, e.file.Source))
+		case "function_definition", "class_definition":
+			inner = c
+		}
+	}
+	if inner == nil {
+		return
+	}
+	switch inner.Type() {
+	case "function_definition":
+		e.handleFunction(inner, decorators)
+	case "class_definition":
+		e.handleClass(inner, decorators)
+	}
+}
+
+// decoratorName extracts the decorator's normalized name from its
+// expression child. For `@redacted` → "redacted"; `@auth.required` →
+// "auth.required"; `@cache(maxsize=10)` → "cache" (the called name).
+func decoratorName(dec *sitter.Node, src []byte) string {
+	if dec.NamedChildCount() == 0 {
+		return ""
+	}
+	expr := dec.NamedChild(0)
+	switch expr.Type() {
+	case "call":
+		// decorator with arguments — name is the called function expr.
+		if fn := expr.ChildByFieldName("function"); fn != nil {
+			return fn.Content(src)
+		}
+	}
+	return expr.Content(src)
 }
 
 func (e *pyExtractor) text(n *sitter.Node) string {
@@ -142,7 +188,7 @@ func (e *pyExtractor) handleImportFrom(n *sitter.Node) {
 	}
 }
 
-func (e *pyExtractor) handleClass(n *sitter.Node) {
+func (e *pyExtractor) handleClass(n *sitter.Node, _ []string) {
 	name := n.ChildByFieldName("name")
 	if name == nil {
 		return
@@ -159,7 +205,7 @@ func (e *pyExtractor) handleClass(n *sitter.Node) {
 	}
 }
 
-func (e *pyExtractor) handleFunction(n *sitter.Node) {
+func (e *pyExtractor) handleFunction(n *sitter.Node, decorators []string) {
 	name := n.ChildByFieldName("name")
 	if name == nil {
 		return
@@ -170,10 +216,11 @@ func (e *pyExtractor) handleFunction(n *sitter.Node) {
 	fqn := FQN(string(e.modFQN) + "." + strings.Join(scopePath, "."))
 
 	e.g.AddFunc(&FuncNode{
-		FQN:  fqn,
-		File: e.file,
-		Node: n,
-		Line: int(n.StartPoint().Row) + 1,
+		FQN:        fqn,
+		File:       e.file,
+		Node:       n,
+		Line:       int(n.StartPoint().Row) + 1,
+		Decorators: decorators,
 	})
 
 	prevFunc := e.curFunc

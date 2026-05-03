@@ -49,6 +49,11 @@ type FuncNode struct {
 	Node *sitter.Node
 	// Line is the 1-based line of the definition.
 	Line int
+	// Decorators are the decorator expressions attached to the function
+	// (without the leading `@`). For `@auth.required` this is
+	// `auth.required`; for `@cache(maxsize=10)` it is `cache` — the
+	// expression text up to the call's function.
+	Decorators []string
 }
 
 // CallSite is a single call expression observed in a function body (or at

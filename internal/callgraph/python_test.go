@@ -74,6 +74,52 @@ func TestBuildPython_BasicReachability(t *testing.T) {
 	}
 }
 
+func TestBuildPython_ExtractsDecorators(t *testing.T) {
+	src := []byte(`@redacted
+def safe_log(x):
+    pass
+
+@auth.required
+@cache(maxsize=10)
+def get_user(uid):
+    return {}
+
+def plain():
+    return 1
+`)
+	f, err := scanner.ParseBytes(context.Background(), "x.py", scanner.LangPython, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := BuildPython([]*scanner.File{f}, "")
+	cases := map[FQN][]string{
+		"x.safe_log": {"redacted"},
+		"x.get_user": {"auth.required", "cache"}, // call-form decorator collapses to its callee name
+		"x.plain":    nil,
+	}
+	for fqn, want := range cases {
+		fn, ok := g.Funcs[fqn]
+		if !ok {
+			t.Fatalf("missing function %q", fqn)
+		}
+		if !equalStrSlice(fn.Decorators, want) {
+			t.Errorf("Decorators[%q] = %v, want %v", fqn, fn.Decorators, want)
+		}
+	}
+}
+
+func equalStrSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestPythonModuleFQN(t *testing.T) {
 	tests := []struct {
 		path, root string

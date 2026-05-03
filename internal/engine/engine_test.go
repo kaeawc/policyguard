@@ -232,6 +232,58 @@ func TestAnalyze_MinimalViolatorDedup(t *testing.T) {
 	}
 }
 
+func TestAnalyze_DecoratorGuardSuppresses(t *testing.T) {
+	// fetch has source + sink and would violate by call-site analysis
+	// alone, but it carries the @redacted decorator — the policy's
+	// has_decorator guard fires and the violation is suppressed.
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/handler.py")
+	const fn callgraph.FQN = "svc.handler.fetch"
+	g.AddFunc(&callgraph.FuncNode{
+		FQN:        fn,
+		File:       f,
+		Line:       1,
+		Decorators: []string{"redacted"},
+	})
+	g.AddCall(fakeCall(fn, "user_repo.get_user", f, 2))
+	g.AddCall(fakeCall(fn, "anthropic.messages.create", f, 3))
+
+	p := basicPolicy()
+	p.Guard = policy.Matcher{AnyOf: []policy.Predicate{
+		{HasDecorator: "@redacted"},
+	}}
+	if got := Analyze(g, p); len(got) != 0 {
+		t.Fatalf("expected no findings (decorator guard), got %+v", got)
+	}
+}
+
+func TestAnalyze_DecoratorGuardOnTransitiveCallee(t *testing.T) {
+	// outer calls inner; inner has source + sink; inner is decorated
+	// with @auth.required which the policy lists as a guard. Even
+	// though the call-site set in inner's closure has both source and
+	// sink, the decorator on inner suppresses the finding for both
+	// inner and outer.
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/h.py")
+	const (
+		outer callgraph.FQN = "svc.h.outer"
+		inner callgraph.FQN = "svc.h.inner"
+	)
+	g.AddFunc(&callgraph.FuncNode{FQN: outer, File: f, Line: 1})
+	g.AddFunc(&callgraph.FuncNode{FQN: inner, File: f, Line: 1, Decorators: []string{"auth.required"}})
+	g.AddCall(fakeCall(outer, inner, f, 2))
+	g.AddCall(fakeCall(inner, "user_repo.get_user", f, 11))
+	g.AddCall(fakeCall(inner, "anthropic.messages.create", f, 12))
+
+	p := basicPolicy()
+	p.Guard = policy.Matcher{AnyOf: []policy.Predicate{
+		{HasDecorator: "@auth.required"},
+	}}
+	if got := Analyze(g, p); len(got) != 0 {
+		t.Fatalf("expected no findings (transitive decorator guard), got %+v", got)
+	}
+}
+
 func TestAnalyze_HandlesCycles(t *testing.T) {
 	// a -> b -> a (cycle). a has the source, b has the sink. The
 	// closure walker must terminate.
