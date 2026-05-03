@@ -129,6 +129,16 @@ func TestExample_PIIRedactionBeforeLLM(t *testing.T) {
 		}
 	})
 
+	t.Run("compliant_decorated", func(t *testing.T) {
+		// summarize_user is decorated with @redacted; the policy lists
+		// has_decorator: "@redacted" as a guard. No findings expected.
+		fix := filepath.Join(root, "tests/fixtures/python/policies/pii_redaction_before_llm/compliant_decorated")
+		findings := runPipeline(t, fix, p)
+		if len(findings) != 0 {
+			t.Errorf("expected no findings (decorator guard), got %+v", findings)
+		}
+	})
+
 	t.Run("violating_interprocedural", func(t *testing.T) {
 		// Source in get_user, sink in call_llm, no guard anywhere.
 		// fetch_summary is the common ancestor whose closure spans both.

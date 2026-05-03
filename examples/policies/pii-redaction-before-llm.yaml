@@ -1,9 +1,9 @@
 # PII redaction before LLM
 #
 # Any codepath that loads a user record (or other PII source) and reaches
-# an LLM API must pass through a redactor first. The MVP `calls` matcher
-# is exact-or-prefix; field_access and has_decorator predicates are listed
-# for documentation but are not yet evaluated by the engine.
+# an LLM API must pass through a redactor first. Supported predicates:
+# `calls` (exact or trailing `.*` wildcard) and `has_decorator`.
+# `field_access` is reserved for a future revision.
 id: pii-redaction-before-llm
 severity: error
 languages: [python]
@@ -20,4 +20,5 @@ guard:
   any_of:
     - calls: redactor.redact
     - calls: app.redactor.redact
+    - has_decorator: "@redacted"
 message: User PII reaches LLM call without passing through redactor.
