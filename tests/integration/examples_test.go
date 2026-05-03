@@ -59,6 +59,40 @@ func runPipeline(t *testing.T, srcDir string, p *policy.Policy) []engine.Finding
 	return engine.Analyze(g, p)
 }
 
+// runExample loads policy at policyRel (relative to repo root) and runs
+// the pipeline against the compliant + violating fixtures under
+// fixtureRel. wantSink is the expected sink callee in the violating run.
+func runExample(t *testing.T, policyRel, fixtureRel, wantSink string) {
+	t.Helper()
+	root := repoRoot(t)
+	p, err := policy.Load(filepath.Join(root, policyRel))
+	if err != nil {
+		t.Fatalf("Load policy %s: %v", policyRel, err)
+	}
+
+	t.Run("compliant", func(t *testing.T) {
+		dir := filepath.Join(root, fixtureRel, "compliant")
+		findings := runPipeline(t, dir, p)
+		if len(findings) != 0 {
+			t.Errorf("expected no findings, got %+v", findings)
+		}
+	})
+
+	t.Run("violating", func(t *testing.T) {
+		dir := filepath.Join(root, fixtureRel, "violating")
+		findings := runPipeline(t, dir, p)
+		if len(findings) != 1 {
+			t.Fatalf("findings = %d, want 1: %+v", len(findings), findings)
+		}
+		if findings[0].PolicyID != p.ID {
+			t.Errorf("PolicyID = %q, want %q", findings[0].PolicyID, p.ID)
+		}
+		if string(findings[0].Sink.Callee) != wantSink {
+			t.Errorf("Sink.Callee = %q, want %q", findings[0].Sink.Callee, wantSink)
+		}
+	})
+}
+
 func TestExample_PIIRedactionBeforeLLM(t *testing.T) {
 	root := repoRoot(t)
 	p, err := policy.Load(filepath.Join(root, "examples/policies/pii-redaction-before-llm.yaml"))
@@ -94,4 +128,12 @@ func TestExample_PIIRedactionBeforeLLM(t *testing.T) {
 			t.Errorf("Function = %q, want contains summarize_user", got.Function)
 		}
 	})
+}
+
+func TestExample_LogUserMustRedact(t *testing.T) {
+	runExample(t,
+		"examples/policies/log-user-must-redact.yaml",
+		"tests/fixtures/python/policies/log_user_must_redact",
+		"logging.info",
+	)
 }

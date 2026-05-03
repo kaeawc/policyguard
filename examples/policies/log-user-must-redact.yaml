@@ -1,0 +1,25 @@
+# Log statements that handle user data must redact first.
+#
+# If a function loads a user record and reaches a logging sink, a
+# redactor must be on the same path. Standard library `logging` and
+# `print` are treated as sinks.
+id: log-user-must-redact
+severity: error
+languages: [python]
+source:
+  any_of:
+    - calls: app.users.load_user
+    - calls: user_repo.get_user
+    - calls: session.current_user
+sink:
+  any_of:
+    - calls: logging.info
+    - calls: logging.warning
+    - calls: logging.error
+    - calls: logging.debug
+    - calls: print
+guard:
+  any_of:
+    - calls: redactor.redact
+    - calls: app.redactor.redact
+message: User object reaches a log sink without passing through redactor.
