@@ -19,8 +19,12 @@
 // Module-scope code (caller == "") is analyzed intra-procedurally only;
 // transitive expansion isn't meaningful at module scope.
 //
-// `has_decorator` and `field_access` predicates are still stubbed (the
-// call-graph builder doesn't extract decorators or attribute reads yet).
+// Each finding includes the chosen source and sink endpoints plus the
+// call chain (counterexample) from the violator function to the
+// function whose body holds those endpoints. For intra-procedural
+// findings the chain is just `[violator]`; interprocedural findings
+// surface the wrapper → helper sequence so the reader can navigate the
+// codepath without re-deriving it from the FQNs.
 package engine
 
 import (
@@ -45,6 +49,14 @@ type Finding struct {
 	// Source and Sink point at the offending call sites.
 	Source FindingSite
 	Sink   FindingSite
+
+	// SourceChain is the call sequence from Function to the function
+	// whose body holds the source site. SinkChain is the same for the
+	// sink. Both start at Function and end at the containing function.
+	// Intra-procedural findings have chains of length 1 ([Function]).
+	// Module-scope findings (Function == "<module>") have nil chains.
+	SourceChain []callgraph.FQN
+	SinkChain   []callgraph.FQN
 }
 
 // FindingSite is one endpoint of a violation.
@@ -86,10 +98,12 @@ func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 		sites := collectSites(g, closures[fqn])
 		fields := collectFields(g, closures[fqn])
 		decorators := collectDecorators(g, closures[fqn])
-		f, ok := evaluate(p, sites, fields, decorators, fqn)
+		f, srcCarrier, sinkCarrier, ok := evaluate(p, sites, fields, decorators, fqn)
 		if !ok {
 			continue
 		}
+		f.SourceChain = shortestPath(fqn, srcCarrier, callees)
+		f.SinkChain = shortestPath(fqn, sinkCarrier, callees)
 		violators[fqn] = f
 	}
 
@@ -122,14 +136,15 @@ func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 
 // analyzeModuleScope runs the original intra-procedural check on the
 // "<module>" caller bucket. Findings here are kept distinct because
-// closures don't apply at module scope. Module scope has no decorators.
+// closures don't apply at module scope. Module scope has no decorators
+// and no call chains (the violator is "<module>" itself).
 func analyzeModuleScope(g *callgraph.Graph, p *policy.Policy) []Finding {
 	sites := g.Calls[""]
 	fields := g.Fields[""]
 	if len(sites) == 0 && len(fields) == 0 {
 		return nil
 	}
-	f, ok := evaluate(p, sites, fields, nil, "")
+	f, _, _, ok := evaluate(p, sites, fields, nil, "")
 	if !ok {
 		return nil
 	}
@@ -188,19 +203,20 @@ func matcherMatchesDecorators(m policy.Matcher, decorators []string) bool {
 
 // evaluate applies the source/guard/sink check across all evidence kinds
 // available at this scope: call sites, field-access sites, and the
-// decorators present on functions in the closure. Returns the finding
-// and whether it violates the policy.
-func evaluate(p *policy.Policy, sites []*callgraph.CallSite, fields []*callgraph.FieldAccess, decorators []string, caller callgraph.FQN) (Finding, bool) {
+// decorators present on functions in the closure. Returns the finding,
+// the carrier FQNs of the matched source/sink (the function whose body
+// holds each), and whether it violates the policy.
+func evaluate(p *policy.Policy, sites []*callgraph.CallSite, fields []*callgraph.FieldAccess, decorators []string, caller callgraph.FQN) (Finding, callgraph.FQN, callgraph.FQN, bool) {
 	if guardSatisfied(p.Guard, sites, fields, decorators) {
-		return Finding{}, false
+		return Finding{}, "", "", false
 	}
-	src, srcSite := firstMatchAny(p.Source, sites, fields)
+	src, srcSite, srcCarrier := firstMatchAny(p.Source, sites, fields)
 	if src == nil {
-		return Finding{}, false
+		return Finding{}, "", "", false
 	}
-	sink, sinkSite := firstMatchAny(p.Sink, sites, fields)
+	sink, sinkSite, sinkCarrier := firstMatchAny(p.Sink, sites, fields)
 	if sink == nil {
-		return Finding{}, false
+		return Finding{}, "", "", false
 	}
 	return Finding{
 		PolicyID: p.ID,
@@ -209,7 +225,7 @@ func evaluate(p *policy.Policy, sites []*callgraph.CallSite, fields []*callgraph
 		Function: displayCaller(caller),
 		Source:   srcSite,
 		Sink:     sinkSite,
-	}, true
+	}, srcCarrier, sinkCarrier, true
 }
 
 // guardSatisfied reports whether the guard matcher fires against the
@@ -218,10 +234,8 @@ func guardSatisfied(m policy.Matcher, sites []*callgraph.CallSite, fields []*cal
 	if matcherMatchesDecorators(m, decorators) {
 		return true
 	}
-	if hit, _ := firstMatchAny(m, sites, fields); hit != nil {
-		return true
-	}
-	return false
+	hit, _, _ := firstMatchAny(m, sites, fields)
+	return hit != nil
 }
 
 // buildCalleeMap inverts g.Calls into caller -> set of internal callees.
@@ -249,6 +263,50 @@ func buildCalleeMap(g *callgraph.Graph) map[callgraph.FQN][]callgraph.FQN {
 		}
 	}
 	return out
+}
+
+// shortestPath returns a shortest call chain from src to dst in the
+// callee graph, inclusive of both endpoints. Returns nil if dst is
+// unreachable; returns [src] when src == dst. Used to render
+// interprocedural counterexamples in findings.
+func shortestPath(src, dst callgraph.FQN, callees map[callgraph.FQN][]callgraph.FQN) []callgraph.FQN {
+	if src == "" || dst == "" {
+		return nil
+	}
+	if src == dst {
+		return []callgraph.FQN{src}
+	}
+	parents := map[callgraph.FQN]callgraph.FQN{src: ""}
+	queue := []callgraph.FQN{src}
+	for len(queue) > 0 {
+		n := queue[0]
+		queue = queue[1:]
+		for _, c := range callees[n] {
+			if _, seen := parents[c]; seen {
+				continue
+			}
+			parents[c] = n
+			if c == dst {
+				return reconstructPath(parents, src, dst)
+			}
+			queue = append(queue, c)
+		}
+	}
+	return nil
+}
+
+func reconstructPath(parents map[callgraph.FQN]callgraph.FQN, src, dst callgraph.FQN) []callgraph.FQN {
+	var rev []callgraph.FQN
+	for n := dst; n != ""; n = parents[n] {
+		rev = append(rev, n)
+		if n == src {
+			break
+		}
+	}
+	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
+		rev[i], rev[j] = rev[j], rev[i]
+	}
+	return rev
 }
 
 // transitiveCallees returns the closure of start under callees, including
@@ -301,21 +359,23 @@ func siteOf(c *callgraph.CallSite) FindingSite {
 }
 
 // firstMatchAny searches calls and fields for the first match. Returns
-// (matched, FindingSite) — `matched` is non-nil if either kind found a
-// hit. Calls are searched first to keep behavior identical when only
+// (matched, FindingSite, carrier FQN) — `matched` is non-nil if either
+// kind found a hit. The carrier is the FQN of the function whose body
+// holds the matched site (used to compute counterexample chains).
+// Calls are searched first to keep behavior identical when only
 // `calls` predicates are used.
-func firstMatchAny(m policy.Matcher, sites []*callgraph.CallSite, fields []*callgraph.FieldAccess) (any, FindingSite) {
+func firstMatchAny(m policy.Matcher, sites []*callgraph.CallSite, fields []*callgraph.FieldAccess) (any, FindingSite, callgraph.FQN) {
 	for _, s := range sites {
 		if matcherMatchesCall(m, s) {
-			return s, siteOf(s)
+			return s, siteOf(s), s.Caller
 		}
 	}
 	for _, f := range fields {
 		if matcherMatchesField(m, f) {
-			return f, fieldSiteOf(f)
+			return f, fieldSiteOf(f), f.Caller
 		}
 	}
-	return nil, FindingSite{}
+	return nil, FindingSite{}, ""
 }
 
 // matcherMatchesCall reports whether the call site matches any `calls`

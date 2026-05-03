@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
+	"github.com/kaeawc/policyguard/internal/callgraph"
 	"github.com/kaeawc/policyguard/internal/engine"
 	"github.com/kaeawc/policyguard/internal/policy"
 )
@@ -65,9 +67,44 @@ func renderText(w io.Writer, args Args) error {
 			f.Function, f.Sink.Path, f.Sink.Line); err != nil {
 			return err
 		}
+		if isInterprocedural(f.SourceChain) {
+			fmt.Fprintf(w, "  source path: %s\n", joinChain(f.SourceChain))
+		}
+		if isInterprocedural(f.SinkChain) {
+			fmt.Fprintf(w, "  sink path:   %s\n", joinChain(f.SinkChain))
+		}
 	}
 	_, err := fmt.Fprintf(w, "\n%d finding(s)\n", len(args.Findings))
 	return err
+}
+
+// isInterprocedural reports whether the chain spans more than one
+// function (a chain of length 1 is just the violator itself, which
+// doesn't add information).
+func isInterprocedural(chain []callgraph.FQN) bool {
+	return len(chain) > 1
+}
+
+// chainStrings flattens a chain to []string. Returns nil for chains
+// that are intra-procedural (length <= 1) so the JSON omits the field
+// entirely.
+func chainStrings(chain []callgraph.FQN) []string {
+	if !isInterprocedural(chain) {
+		return nil
+	}
+	out := make([]string, len(chain))
+	for i, c := range chain {
+		out[i] = string(c)
+	}
+	return out
+}
+
+func joinChain(chain []callgraph.FQN) string {
+	parts := make([]string, len(chain))
+	for i, c := range chain {
+		parts[i] = string(c)
+	}
+	return strings.Join(parts, " -> ")
 }
 
 // ------------------------------------------------------------ markdown
@@ -130,6 +167,16 @@ func renderMarkdownFinding(w io.Writer, f engine.Finding) error {
 		f.Sink.Path, f.Sink.Line, f.Sink.Path, f.Sink.Line, f.Sink.Callee); err != nil {
 		return err
 	}
+	if isInterprocedural(f.SourceChain) {
+		if _, err := fmt.Fprintf(w, "- source path: `%s`\n", joinChain(f.SourceChain)); err != nil {
+			return err
+		}
+	}
+	if isInterprocedural(f.SinkChain) {
+		if _, err := fmt.Fprintf(w, "- sink path: `%s`\n", joinChain(f.SinkChain)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -138,12 +185,14 @@ func renderMarkdownFinding(w io.Writer, f engine.Finding) error {
 // jsonFinding is the wire shape — independent of engine internals so
 // downstream consumers don't break when we refactor.
 type jsonFinding struct {
-	PolicyID string          `json:"policy_id"`
-	Severity policy.Severity `json:"severity"`
-	Message  string          `json:"message"`
-	Function string          `json:"function"`
-	Source   jsonSite        `json:"source"`
-	Sink     jsonSite        `json:"sink"`
+	PolicyID    string          `json:"policy_id"`
+	Severity    policy.Severity `json:"severity"`
+	Message     string          `json:"message"`
+	Function    string          `json:"function"`
+	Source      jsonSite        `json:"source"`
+	Sink        jsonSite        `json:"sink"`
+	SourceChain []string        `json:"source_chain,omitempty"`
+	SinkChain   []string        `json:"sink_chain,omitempty"`
 }
 
 type jsonSite struct {
@@ -170,6 +219,8 @@ func renderJSON(w io.Writer, args Args) error {
 				Path:   f.Sink.Path,
 				Line:   f.Sink.Line,
 			},
+			SourceChain: chainStrings(f.SourceChain),
+			SinkChain:   chainStrings(f.SinkChain),
 		})
 	}
 	enc := json.NewEncoder(w)

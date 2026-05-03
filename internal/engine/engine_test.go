@@ -363,6 +363,70 @@ func TestAnalyze_FieldAccessSourceWithCallSink(t *testing.T) {
 	}
 }
 
+func TestAnalyze_ChainsForInterprocedural(t *testing.T) {
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/h.py")
+	const (
+		fetch callgraph.FQN = "svc.h.fetch"
+		getU  callgraph.FQN = "svc.h.get_user"
+		callL callgraph.FQN = "svc.h.call_llm"
+	)
+	for _, fn := range []callgraph.FQN{fetch, getU, callL} {
+		g.AddFunc(&callgraph.FuncNode{FQN: fn, File: f, Line: 1})
+	}
+	g.AddCall(fakeCall(fetch, getU, f, 2))
+	g.AddCall(fakeCall(fetch, callL, f, 3))
+	g.AddCall(fakeCall(getU, "user_repo.get_user", f, 11))
+	g.AddCall(fakeCall(callL, "anthropic.messages.create", f, 21))
+
+	findings := Analyze(g, basicPolicy())
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d", len(findings))
+	}
+	got := findings[0]
+	wantSrc := []callgraph.FQN{fetch, getU}
+	wantSink := []callgraph.FQN{fetch, callL}
+	if !equalFQNs(got.SourceChain, wantSrc) {
+		t.Errorf("SourceChain = %v, want %v", got.SourceChain, wantSrc)
+	}
+	if !equalFQNs(got.SinkChain, wantSink) {
+		t.Errorf("SinkChain = %v, want %v", got.SinkChain, wantSink)
+	}
+}
+
+func TestAnalyze_ChainsForIntraprocedural(t *testing.T) {
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/h.py")
+	const fn callgraph.FQN = "svc.h.fetch"
+	g.AddFunc(&callgraph.FuncNode{FQN: fn, File: f, Line: 1})
+	g.AddCall(fakeCall(fn, "user_repo.get_user", f, 2))
+	g.AddCall(fakeCall(fn, "anthropic.messages.create", f, 3))
+
+	findings := Analyze(g, basicPolicy())
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d", len(findings))
+	}
+	want := []callgraph.FQN{fn}
+	if !equalFQNs(findings[0].SourceChain, want) {
+		t.Errorf("SourceChain = %v, want %v", findings[0].SourceChain, want)
+	}
+	if !equalFQNs(findings[0].SinkChain, want) {
+		t.Errorf("SinkChain = %v, want %v", findings[0].SinkChain, want)
+	}
+}
+
+func equalFQNs(a, b []callgraph.FQN) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestAnalyze_HandlesCycles(t *testing.T) {
 	// a -> b -> a (cycle). a has the source, b has the sink. The
 	// closure walker must terminate.
