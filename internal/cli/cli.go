@@ -59,7 +59,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  parse     [--lang LANG] FILE [FILE...]   Parse files and print AST root info.")
 	fmt.Fprintln(w, "  callgraph [--lang LANG] DIR              Build a call graph for a directory.")
-	fmt.Fprintln(w, "  check     --policies DIR [--lang LANG] [--format text|json|sarif] DIR")
+	fmt.Fprintln(w, "  check     --policies DIR [--lang LANG] [--format text|json|sarif|markdown] DIR")
 	fmt.Fprintln(w, "                                           Run policies against a source tree; exit 1 on findings.")
 	fmt.Fprintln(w, "  version                                  Print the policyguard version.")
 }
@@ -135,7 +135,7 @@ func (c *runChecker) runCheck(ctx context.Context, argv []string, stdout, stderr
 	fset.SetOutput(stderr)
 	lang := fset.String("lang", "python", "source language (python)")
 	policiesDir := fset.String("policies", "", "directory containing policy YAML files")
-	format := fset.String("format", "text", "output format: text|json|sarif")
+	format := fset.String("format", "text", "output format: text|json|sarif|markdown")
 	var policyFiles stringSlice
 	fset.Var(&policyFiles, "policy", "single policy file (repeatable)")
 	if err := fset.Parse(argv); err != nil {
