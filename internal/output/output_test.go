@@ -171,6 +171,56 @@ func TestRender_SARIFFallsBackToFindingsForRules(t *testing.T) {
 	}
 }
 
+func TestRender_MarkdownEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatMarkdown, Args{}); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{"## policyguard", "No policy violations found"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("markdown empty output missing %q\nhad:\n%s", want, got)
+		}
+	}
+}
+
+func TestRender_MarkdownWithFindings(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatMarkdown, Args{Findings: sampleFindings()}); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{
+		"## policyguard — 1 finding(s)",
+		"**[error]** `pii-redaction-before-llm` in `svc.handler.fetch`",
+		"> User PII reaches LLM call.",
+		"[svc/handler.py:2](svc/handler.py#L2)",
+		"`user_repo.get_user`",
+		"[svc/handler.py:3](svc/handler.py#L3)",
+		"`anthropic.messages.create`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("markdown output missing %q\nhad:\n%s", want, got)
+		}
+	}
+}
+
+func TestRender_MarkdownMultipleFindingsSeparator(t *testing.T) {
+	findings := []engine.Finding{sampleFindings()[0], sampleFindings()[0]}
+	findings[1].PolicyID = "second-rule"
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatMarkdown, Args{Findings: findings}); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "\n---\n") {
+		t.Errorf("expected separator between findings\nhad:\n%s", got)
+	}
+	if !strings.Contains(got, "second-rule") {
+		t.Errorf("missing second finding\nhad:\n%s", got)
+	}
+}
+
 func TestRender_UnknownFormatErrors(t *testing.T) {
 	var buf bytes.Buffer
 	err := Render(&buf, Format("xml"), Args{})

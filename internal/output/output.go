@@ -16,9 +16,10 @@ import (
 type Format string
 
 const (
-	FormatText  Format = "text"
-	FormatJSON  Format = "json"
-	FormatSARIF Format = "sarif"
+	FormatText     Format = "text"
+	FormatJSON     Format = "json"
+	FormatSARIF    Format = "sarif"
+	FormatMarkdown Format = "markdown"
 )
 
 // Args bundles everything any renderer might need. Each format reads only
@@ -42,6 +43,8 @@ func Render(w io.Writer, format Format, args Args) error {
 		return renderJSON(w, args)
 	case FormatSARIF:
 		return renderSARIF(w, args)
+	case FormatMarkdown:
+		return renderMarkdown(w, args)
 	default:
 		return fmt.Errorf("unknown output format: %q", format)
 	}
@@ -65,6 +68,69 @@ func renderText(w io.Writer, args Args) error {
 	}
 	_, err := fmt.Fprintf(w, "\n%d finding(s)\n", len(args.Findings))
 	return err
+}
+
+// ------------------------------------------------------------ markdown
+
+// renderMarkdown emits a PR-comment-friendly summary. Layout:
+//
+//	## policyguard
+//	No policy violations found. ✓
+//
+// Or, with findings:
+//
+//	## policyguard — N finding(s)
+//
+//	**[error]** `pii-redaction-before-llm` in `app.handlers.fetch_summary`
+//	> User PII reaches LLM call without passing through redactor.
+//	- source: [app/handlers.py:7](app/handlers.py#L7) — `app.handlers.load_user`
+//	- sink:   [app/handlers.py:15](app/handlers.py#L15) — `anthropic.messages.create`
+//
+//	---
+//	(more findings…)
+//
+// Findings are kept in the order Analyze produced (sorted by function
+// FQN then source line) so the rendering is stable across runs.
+func renderMarkdown(w io.Writer, args Args) error {
+	if len(args.Findings) == 0 {
+		_, err := fmt.Fprintln(w, "## policyguard\nNo policy violations found.")
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "## policyguard — %d finding(s)\n\n", len(args.Findings)); err != nil {
+		return err
+	}
+	for i, f := range args.Findings {
+		if i > 0 {
+			if _, err := fmt.Fprintln(w, "\n---"); err != nil {
+				return err
+			}
+		}
+		if err := renderMarkdownFinding(w, f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renderMarkdownFinding(w io.Writer, f engine.Finding) error {
+	if _, err := fmt.Fprintf(w, "**[%s]** `%s` in `%s`\n",
+		f.Severity, f.PolicyID, f.Function); err != nil {
+		return err
+	}
+	if f.Message != "" {
+		if _, err := fmt.Fprintf(w, "> %s\n\n", f.Message); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintf(w, "- source: [%s:%d](%s#L%d) — `%s`\n",
+		f.Source.Path, f.Source.Line, f.Source.Path, f.Source.Line, f.Source.Callee); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "- sink: [%s:%d](%s#L%d) — `%s`\n",
+		f.Sink.Path, f.Sink.Line, f.Sink.Path, f.Sink.Line, f.Sink.Callee); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------- json
