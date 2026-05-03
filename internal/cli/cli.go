@@ -193,6 +193,8 @@ func (c *runChecker) runPipeline(ctx context.Context, srcRoot string, lang scann
 	switch lang {
 	case scanner.LangPython:
 		g = callgraph.BuildPython(files, srcRoot)
+	case scanner.LangTypeScript:
+		g = callgraph.BuildTypeScript(files, srcRoot)
 	default:
 		fmt.Fprintf(stderr, "policyguard: check not implemented for %s\n", lang)
 		return nil, nil, 1
@@ -257,9 +259,17 @@ func loadSourceDir(ctx context.Context, root string, lang scanner.Language) ([]*
 }
 
 func loadDir(ctx context.Context, root string, lang scanner.Language) ([]*scanner.File, error) {
-	ext := extForLang(lang)
-	if ext == "" {
+	exts := extForLang(lang)
+	if len(exts) == 0 {
 		return nil, fmt.Errorf("unknown language: %s", lang)
+	}
+	matchExt := func(p string) bool {
+		for _, ext := range exts {
+			if strings.HasSuffix(p, ext) {
+				return true
+			}
+		}
+		return false
 	}
 	var out []*scanner.File
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -269,7 +279,7 @@ func loadDir(ctx context.Context, root string, lang scanner.Language) ([]*scanne
 		if d.IsDir() {
 			return nil
 		}
-		if !strings.HasSuffix(path, ext) {
+		if !matchExt(path) {
 			return nil
 		}
 		file, perr := scanner.ParseFile(ctx, path, lang)
@@ -282,12 +292,14 @@ func loadDir(ctx context.Context, root string, lang scanner.Language) ([]*scanne
 	return out, err
 }
 
-func extForLang(lang scanner.Language) string {
+func extForLang(lang scanner.Language) []string {
 	switch lang {
 	case scanner.LangPython:
-		return ".py"
+		return []string{".py"}
+	case scanner.LangTypeScript:
+		return []string{".ts", ".tsx"}
 	default:
-		return ""
+		return nil
 	}
 }
 

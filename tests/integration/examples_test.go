@@ -30,19 +30,44 @@ func repoRoot(t *testing.T) string {
 	return root
 }
 
-// runPipeline parses every Python file under srcDir, builds a call graph,
-// and analyzes it against p. Returns the findings.
+// runPipeline parses every source file under srcDir matching the
+// policy's first declared language, builds a call graph, and analyzes
+// it. Currently supports Python and TypeScript.
 func runPipeline(t *testing.T, srcDir string, p *policy.Policy) []engine.Finding {
 	t.Helper()
+	if len(p.Languages) == 0 {
+		t.Fatalf("policy %q has no languages", p.ID)
+	}
+	lang := p.Languages[0]
+	var sLang scanner.Language
+	var exts []string
+	switch lang {
+	case policy.LangPython:
+		sLang = scanner.LangPython
+		exts = []string{".py"}
+	case policy.LangTypeScript:
+		sLang = scanner.LangTypeScript
+		exts = []string{".ts", ".tsx"}
+	default:
+		t.Fatalf("integration test does not support language %q", lang)
+	}
+	matchExt := func(p string) bool {
+		for _, ext := range exts {
+			if strings.HasSuffix(p, ext) {
+				return true
+			}
+		}
+		return false
+	}
 	var files []*scanner.File
 	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !strings.HasSuffix(path, ".py") {
+		if d.IsDir() || !matchExt(path) {
 			return nil
 		}
-		f, perr := scanner.ParseFile(context.Background(), path, scanner.LangPython)
+		f, perr := scanner.ParseFile(context.Background(), path, sLang)
 		if perr != nil {
 			return perr
 		}
@@ -53,9 +78,15 @@ func runPipeline(t *testing.T, srcDir string, p *policy.Policy) []engine.Finding
 		t.Fatalf("walk %s: %v", srcDir, err)
 	}
 	if len(files) == 0 {
-		t.Fatalf("no .py files under %s", srcDir)
+		t.Fatalf("no %s files under %s", sLang, srcDir)
 	}
-	g := callgraph.BuildPython(files, srcDir)
+	var g *callgraph.Graph
+	switch sLang {
+	case scanner.LangPython:
+		g = callgraph.BuildPython(files, srcDir)
+	case scanner.LangTypeScript:
+		g = callgraph.BuildTypeScript(files, srcDir)
+	}
 	return engine.Analyze(g, p)
 }
 
@@ -162,6 +193,14 @@ func TestExample_LogUserMustRedact(t *testing.T) {
 		"examples/policies/log-user-must-redact.yaml",
 		"tests/fixtures/python/policies/log_user_must_redact",
 		"logging.info",
+	)
+}
+
+func TestExample_PIIRedactionBeforeLLM_TypeScript(t *testing.T) {
+	runExample(t,
+		"examples/policies/pii-redaction-before-llm-ts.yaml",
+		"tests/fixtures/typescript/policies/pii_redaction_before_llm",
+		"anthropic.messages.create",
 	)
 }
 
