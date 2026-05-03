@@ -1,0 +1,22 @@
+# PII redaction before LLM (TypeScript variant)
+#
+# Mirror of pii-redaction-before-llm.yaml with TypeScript-shaped FQNs.
+# Named imports like `import { redact } from './redactor'` resolve
+# `redact(...)` to `./redactor.redact`. The resolver also exposes the
+# bare callee text as a raw-text fallback, so plain identifier matchers
+# like `calls: loadUser` work even for module-local helpers.
+id: pii-redaction-before-llm-ts
+severity: error
+languages: [typescript]
+source:
+  any_of:
+    - calls: loadUser
+sink:
+  any_of:
+    - calls: anthropic.messages.create
+    - calls: openai.chat.completions.create
+guard:
+  any_of:
+    - calls: ./redactor.redact
+    - calls: redact
+message: User PII reaches LLM call without passing through redactor.
