@@ -42,6 +42,7 @@ func BuildGo(files []*scanner.File, rootDir string) *Graph {
 		modFQN := goModuleFQN(f.Path, rootDir)
 		ext := newGoExtractor(g, f, modFQN)
 		ext.walk(f.Root())
+		scanComments(g, f)
 	}
 	return g
 }

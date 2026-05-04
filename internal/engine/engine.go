@@ -89,9 +89,12 @@ type FindingSite struct {
 
 // Analyze runs one policy over the call graph and returns the violations,
 // sorted deterministically by function FQN then source line.
+// Suppressed findings (those whose source or sink line is covered by a
+// `policyguard: ignore <id>` annotation) are filtered out.
 func Analyze(g *callgraph.Graph, p *policy.Policy) []Finding {
 	out := analyzeFunctions(g, p)
 	out = append(out, analyzeModuleScope(g, p)...)
+	out = filterSuppressed(g, p, out)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Function != out[j].Function {
 			return out[i].Function < out[j].Function
@@ -101,6 +104,24 @@ func Analyze(g *callgraph.Graph, p *policy.Policy) []Finding {
 		}
 		return out[i].Source.Line < out[j].Source.Line
 	})
+	return out
+}
+
+// filterSuppressed removes findings whose source or sink site line is
+// covered by a matching `policyguard: ignore` annotation. Both the
+// source and sink locations are checked so authors can place the
+// directive at either end of the violating path.
+func filterSuppressed(g *callgraph.Graph, p *policy.Policy, findings []Finding) []Finding {
+	out := findings[:0]
+	for _, f := range findings {
+		if g.MatchSuppression(f.Source.Path, f.Source.Line, p.ID) {
+			continue
+		}
+		if g.MatchSuppression(f.Sink.Path, f.Sink.Line, p.ID) {
+			continue
+		}
+		out = append(out, f)
+	}
 	return out
 }
 

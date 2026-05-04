@@ -23,8 +23,8 @@ import (
 // Examples: "app.handlers.fetch", "app.models.User.save", "anthropic.messages.create".
 type FQN string
 
-// Graph holds all functions, call edges, and attribute reads discovered
-// across a set of files.
+// Graph holds all functions, call edges, attribute reads, and
+// suppression annotations discovered across a set of files.
 type Graph struct {
 	// Funcs is keyed by FQN. Includes only project-defined functions.
 	Funcs map[FQN]*FuncNode
@@ -37,15 +37,58 @@ type Graph struct {
 	// callee of a call site are NOT included here (they're already
 	// represented in Calls), so a single `obj.method()` shows up once.
 	Fields map[FQN][]*FieldAccess
+	// Suppressions records `policyguard: ignore <ids>` annotations
+	// extracted from source comments. Indexed by file path; each entry
+	// holds the line number plus the matched policy IDs (or `*` for
+	// catch-all).
+	Suppressions map[string][]Suppression
 }
 
 // NewGraph returns an empty graph.
 func NewGraph() *Graph {
 	return &Graph{
-		Funcs:  make(map[FQN]*FuncNode),
-		Calls:  make(map[FQN][]*CallSite),
-		Fields: make(map[FQN][]*FieldAccess),
+		Funcs:        make(map[FQN]*FuncNode),
+		Calls:        make(map[FQN][]*CallSite),
+		Fields:       make(map[FQN][]*FieldAccess),
+		Suppressions: make(map[string][]Suppression),
 	}
+}
+
+// Suppression is one `policyguard: ignore <ids>` annotation from source.
+// PolicyIDs is the list of ids the comment matches; the special id
+// "*" indicates a catch-all suppression.
+type Suppression struct {
+	Path      string
+	Line      int
+	PolicyIDs []string
+}
+
+// AddSuppression appends a suppression for the given file.
+func (g *Graph) AddSuppression(s Suppression) {
+	g.Suppressions[s.Path] = append(g.Suppressions[s.Path], s)
+}
+
+// MatchSuppression reports whether some suppression on the given file
+// covers the given line for the given policy id. A suppression on line
+// L applies to lines L (inline) and L+1 (the line after the comment),
+// so both `func() # policyguard: ignore X` and the more common
+//
+//	# policyguard: ignore X
+//	func()
+//
+// form work.
+func (g *Graph) MatchSuppression(path string, line int, policyID string) bool {
+	for _, s := range g.Suppressions[path] {
+		if s.Line != line && s.Line+1 != line {
+			continue
+		}
+		for _, id := range s.PolicyIDs {
+			if id == "*" || id == policyID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // FuncNode is a function or method defined in the project.

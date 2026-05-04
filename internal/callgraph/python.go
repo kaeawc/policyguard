@@ -21,6 +21,7 @@ func BuildPython(files []*scanner.File, rootDir string) *Graph {
 		modFQN := pythonModuleFQN(f.Path, rootDir)
 		ext := newPyExtractor(g, f, modFQN)
 		ext.walk(f.Root())
+		scanComments(g, f)
 	}
 	return g
 }

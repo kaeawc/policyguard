@@ -486,6 +486,61 @@ func TestAnalyze_NoFixWhenPolicyOmitsFix(t *testing.T) {
 	}
 }
 
+func TestAnalyze_SuppressionByExactID(t *testing.T) {
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/h.py")
+	const fn callgraph.FQN = "svc.h.fetch"
+	g.AddFunc(&callgraph.FuncNode{FQN: fn, File: f, Line: 1})
+	g.AddCall(fakeCall(fn, "user_repo.get_user", f, 2))
+	g.AddCall(fakeCall(fn, "anthropic.messages.create", f, 3))
+	// Suppression on line 2 covers lines 2 and 3 (line+1 rule).
+	g.AddSuppression(callgraph.Suppression{
+		Path:      "svc/h.py",
+		Line:      2,
+		PolicyIDs: []string{"pii-redaction-before-llm"},
+	})
+
+	if got := Analyze(g, basicPolicy()); len(got) != 0 {
+		t.Errorf("expected no findings (suppressed), got %+v", got)
+	}
+}
+
+func TestAnalyze_SuppressionWildcard(t *testing.T) {
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/h.py")
+	const fn callgraph.FQN = "svc.h.fetch"
+	g.AddFunc(&callgraph.FuncNode{FQN: fn, File: f, Line: 1})
+	g.AddCall(fakeCall(fn, "user_repo.get_user", f, 2))
+	g.AddCall(fakeCall(fn, "anthropic.messages.create", f, 3))
+	g.AddSuppression(callgraph.Suppression{
+		Path:      "svc/h.py",
+		Line:      3,
+		PolicyIDs: []string{"*"},
+	})
+
+	if got := Analyze(g, basicPolicy()); len(got) != 0 {
+		t.Errorf("expected no findings (wildcard suppression), got %+v", got)
+	}
+}
+
+func TestAnalyze_SuppressionDifferentPolicyIgnored(t *testing.T) {
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/h.py")
+	const fn callgraph.FQN = "svc.h.fetch"
+	g.AddFunc(&callgraph.FuncNode{FQN: fn, File: f, Line: 1})
+	g.AddCall(fakeCall(fn, "user_repo.get_user", f, 2))
+	g.AddCall(fakeCall(fn, "anthropic.messages.create", f, 3))
+	g.AddSuppression(callgraph.Suppression{
+		Path:      "svc/h.py",
+		Line:      3,
+		PolicyIDs: []string{"some-other-policy"},
+	})
+
+	if got := Analyze(g, basicPolicy()); len(got) != 1 {
+		t.Errorf("expected finding (suppression mismatch), got %+v", got)
+	}
+}
+
 func TestAnalyze_HandlesCycles(t *testing.T) {
 	// a -> b -> a (cycle). a has the source, b has the sink. The
 	// closure walker must terminate.

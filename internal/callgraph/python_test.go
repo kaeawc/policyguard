@@ -154,6 +154,31 @@ func TestBuildPython_ExtractsFieldAccess(t *testing.T) {
 	}
 }
 
+func TestBuildPython_RecordsSuppressions(t *testing.T) {
+	src := []byte(`def f():
+    # policyguard: ignore foo, bar
+    return 1
+# policyguard: ignore-all
+def g():
+    return 2
+`)
+	file, err := scanner.ParseBytes(context.Background(), "x.py", scanner.LangPython, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := BuildPython([]*scanner.File{file}, "")
+	supps := g.Suppressions["x.py"]
+	if len(supps) != 2 {
+		t.Fatalf("Suppressions = %+v, want 2", supps)
+	}
+	if supps[0].Line != 2 || len(supps[0].PolicyIDs) != 2 {
+		t.Errorf("first suppression = %+v", supps[0])
+	}
+	if supps[1].Line != 4 || supps[1].PolicyIDs[0] != "*" {
+		t.Errorf("second suppression = %+v", supps[1])
+	}
+}
+
 func TestPythonModuleFQN(t *testing.T) {
 	tests := []struct {
 		path, root string
