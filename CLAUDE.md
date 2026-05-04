@@ -59,6 +59,30 @@ make check-fixtures           # binary against bundled fixtures
 golangci-lint run             # style + complexity gate
 ```
 
+## Benchmarks
+
+`internal/engine/bench_test.go` measures `Analyze` on synthetic graphs
+of 50 / 500 / 2000 internal functions plus a 10-policy sweep against
+the medium graph. To run:
+
+```bash
+go test -bench=. -benchmem -run=^$ ./internal/engine/
+```
+
+To profile:
+
+```bash
+go test -bench=BenchmarkAnalyze_LargeGraph -benchtime=3x \
+  -cpuprofile=/tmp/cpu.prof -run=^$ ./internal/engine/
+go tool pprof -top -cum /tmp/cpu.prof
+```
+
+Hot spots that have already been addressed: per-call sort overhead
+(replaced with one global sort + closure-membership filter; switched
+`sort.Slice` → `slices.Sort` to drop reflection cost). Further work
+could SCC-collapse closures, share the closure map across multiple
+policies, or switch closure membership to a bitset over an FQN index.
+
 ## Adding a language
 
 1. Add the tree-sitter grammar binding to `internal/scanner/parser.go`

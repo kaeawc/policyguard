@@ -28,7 +28,7 @@
 package engine
 
 import (
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -136,14 +136,20 @@ func Analyze(g *callgraph.Graph, p *policy.Policy) []Finding {
 	out := analyzeFunctions(g, p)
 	out = append(out, analyzeModuleScope(g, p)...)
 	out = filterSuppressed(g, p, out)
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Function != out[j].Function {
-			return out[i].Function < out[j].Function
+	slices.SortFunc(out, func(a, b Finding) int {
+		if a.Function != b.Function {
+			if a.Function < b.Function {
+				return -1
+			}
+			return 1
 		}
-		if out[i].Source.Path != out[j].Source.Path {
-			return out[i].Source.Path < out[j].Source.Path
+		if a.Source.Path != b.Source.Path {
+			if a.Source.Path < b.Source.Path {
+				return -1
+			}
+			return 1
 		}
-		return out[i].Source.Line < out[j].Source.Line
+		return a.Source.Line - b.Source.Line
 	})
 	return out
 }
@@ -172,6 +178,7 @@ func filterSuppressed(g *callgraph.Graph, p *policy.Policy, findings []Finding) 
 func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 	callees := buildCalleeMap(g)
 	bridges := buildBridgeMap(g)
+	sortedFuncs := sortedFuncFQNs(g)
 	closures := make(map[callgraph.FQN]map[callgraph.FQN]bool, len(g.Funcs))
 	for fqn := range g.Funcs {
 		closures[fqn] = transitiveCallees(fqn, callees)
@@ -179,9 +186,9 @@ func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 
 	violators := make(map[callgraph.FQN]Finding, 0)
 	for fqn := range g.Funcs {
-		sites := collectSites(g, closures[fqn])
-		fields := collectFields(g, closures[fqn])
-		decorators := collectDecorators(g, closures[fqn])
+		sites := collectSites(g, closures[fqn], sortedFuncs)
+		fields := collectFields(g, closures[fqn], sortedFuncs)
+		decorators := collectDecorators(g, closures[fqn], sortedFuncs)
 		ev, ok := evaluate(p, sites, fields, decorators, fqn)
 		if !ok {
 			continue
@@ -421,30 +428,26 @@ func firstGuardValue(m policy.Matcher) string {
 }
 
 // collectFields returns the union of field-access sites across every
-// function in the closure, in stable FQN order.
-func collectFields(g *callgraph.Graph, closure map[callgraph.FQN]bool) []*callgraph.FieldAccess {
-	fqns := make([]callgraph.FQN, 0, len(closure))
-	for fqn := range closure {
-		fqns = append(fqns, fqn)
-	}
-	sort.Slice(fqns, func(i, j int) bool { return fqns[i] < fqns[j] })
+// function in the closure, in stable FQN order. Mirror of collectSites.
+func collectFields(g *callgraph.Graph, closure map[callgraph.FQN]bool, sortedAll []callgraph.FQN) []*callgraph.FieldAccess {
 	var out []*callgraph.FieldAccess
-	for _, fqn := range fqns {
+	for _, fqn := range sortedAll {
+		if !closure[fqn] {
+			continue
+		}
 		out = append(out, g.Fields[fqn]...)
 	}
 	return out
 }
 
 // collectDecorators returns the union of decorator names across every
-// function in the closure. Order is stable (sorted by FQN).
-func collectDecorators(g *callgraph.Graph, closure map[callgraph.FQN]bool) []string {
-	fqns := make([]callgraph.FQN, 0, len(closure))
-	for fqn := range closure {
-		fqns = append(fqns, fqn)
-	}
-	sort.Slice(fqns, func(i, j int) bool { return fqns[i] < fqns[j] })
+// function in the closure. Mirror of collectSites.
+func collectDecorators(g *callgraph.Graph, closure map[callgraph.FQN]bool, sortedAll []callgraph.FQN) []string {
 	var out []string
-	for _, fqn := range fqns {
+	for _, fqn := range sortedAll {
+		if !closure[fqn] {
+			continue
+		}
 		if fn, ok := g.Funcs[fqn]; ok {
 			out = append(out, fn.Decorators...)
 		}
@@ -662,17 +665,30 @@ func transitiveCallees(start callgraph.FQN, callees map[callgraph.FQN][]callgrap
 	return visited
 }
 
-// collectSites returns the union of call sites authored by any function
-// in the closure. Stable order is achieved by sorting closure FQNs first
-// and preserving each function's own site order.
-func collectSites(g *callgraph.Graph, closure map[callgraph.FQN]bool) []*callgraph.CallSite {
-	fqns := make([]callgraph.FQN, 0, len(closure))
-	for fqn := range closure {
-		fqns = append(fqns, fqn)
+// sortedFuncFQNs returns the FQNs of every function in g, sorted
+// lexically. Computed once per analysis pass; the per-function
+// collectors filter this slice by closure membership instead of
+// re-sorting.
+func sortedFuncFQNs(g *callgraph.Graph) []callgraph.FQN {
+	out := make([]callgraph.FQN, 0, len(g.Funcs))
+	for fqn := range g.Funcs {
+		out = append(out, fqn)
 	}
-	sort.Slice(fqns, func(i, j int) bool { return fqns[i] < fqns[j] })
+	slices.Sort(out)
+	return out
+}
+
+// collectSites returns the union of call sites authored by every
+// function in the closure, in stable (sorted-FQN) order. The sortedAll
+// argument is the graph's full list of internal FQNs sorted once per
+// analysis pass; this function filters it by closure membership rather
+// than allocating + sorting a fresh slice per call.
+func collectSites(g *callgraph.Graph, closure map[callgraph.FQN]bool, sortedAll []callgraph.FQN) []*callgraph.CallSite {
 	var out []*callgraph.CallSite
-	for _, fqn := range fqns {
+	for _, fqn := range sortedAll {
+		if !closure[fqn] {
+			continue
+		}
 		out = append(out, g.Calls[fqn]...)
 	}
 	return out
