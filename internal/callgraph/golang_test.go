@@ -75,6 +75,54 @@ func (f Foo) Baz() string { return "y" }
 	}
 }
 
+func TestBuildGo_ReceiverTypedParameter(t *testing.T) {
+	// f's parameter `r` has type *redactor.Redactor (imported). The
+	// `r.Redact(x)` call should resolve to the canonical FQN.
+	src := `package handler
+import "example.com/redactor"
+func F(r *redactor.Redactor) string { return r.Redact("x") }
+`
+	g := BuildGo([]*scanner.File{parseGo(t, "handler/handler.go", src)}, "")
+	calls := g.Calls["handler.F"]
+	if len(calls) != 1 {
+		t.Fatalf("calls = %+v", calls)
+	}
+	if string(calls[0].Callee) != "example.com/redactor.Redactor.Redact" {
+		t.Errorf("Callee = %q, want canonical FQN", calls[0].Callee)
+	}
+	if calls[0].Raw != "r.Redact" {
+		t.Errorf("Raw = %q, want 'r.Redact'", calls[0].Raw)
+	}
+}
+
+func TestBuildGo_ReceiverTypedMethodReceiver(t *testing.T) {
+	// h is the method receiver, a *Handler. Calls like `h.helper()`
+	// resolve to <pkg>.Handler.helper.
+	src := `package handler
+type Handler struct{}
+func (h *Handler) F() string { return h.helper() }
+func (h *Handler) helper() string { return "x" }
+`
+	g := BuildGo([]*scanner.File{parseGo(t, "handler/handler.go", src)}, "")
+	calls := g.Calls["handler.Handler.F"]
+	if len(calls) != 1 || string(calls[0].Callee) != "handler.Handler.helper" {
+		t.Errorf("calls = %+v", calls)
+	}
+}
+
+func TestBuildGo_ReceiverTypedSamePackageType(t *testing.T) {
+	// Parameter type is in the same package; resolves to <pkg>.<TypeName>.<method>.
+	src := `package handler
+type Local struct{}
+func F(l *Local) string { return l.Run() }
+`
+	g := BuildGo([]*scanner.File{parseGo(t, "handler/handler.go", src)}, "")
+	calls := g.Calls["handler.F"]
+	if len(calls) != 1 || string(calls[0].Callee) != "handler.Local.Run" {
+		t.Errorf("calls = %+v", calls)
+	}
+}
+
 func TestBuildGo_ImportSkipsBlankAndDot(t *testing.T) {
 	src := `package handler
 

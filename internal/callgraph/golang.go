@@ -71,6 +71,12 @@ type goExtractor struct {
 	modFQN  FQN
 	imports map[string]FQN
 	curFunc FQN
+	// localTypes maps a parameter / receiver name to its declared type
+	// FQN (canonical: an `<import-path>.TypeName` for imported types,
+	// or `<modFQN>.TypeName` for same-package types). Reset per function.
+	// Untyped variables (`x := f()`) are not tracked — type inference
+	// is a follow-up.
+	localTypes map[string]string
 }
 
 func newGoExtractor(g *Graph, f *scanner.File, modFQN FQN) *goExtractor {
@@ -204,21 +210,22 @@ func (e *goExtractor) handleFunction(n *sitter.Node) {
 	if name == nil {
 		return
 	}
-	e.recordAndRecurse(n, e.text(name), "")
+	params := firstChildOfType(n, "parameter_list")
+	e.recordAndRecurse(n, e.text(name), "", params, nil)
 }
 
 func (e *goExtractor) handleMethod(n *sitter.Node) {
 	// method_declaration: parameter_list (receiver) + field_identifier (name) + parameter_list (args) + body
-	var recvType string
+	var recv, params *sitter.Node
 	var name string
-	seenParam := false
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		c := n.NamedChild(i)
 		switch c.Type() {
 		case "parameter_list":
-			if !seenParam {
-				recvType = goReceiverType(c, e.file.Source)
-				seenParam = true
+			if recv == nil {
+				recv = c
+			} else if params == nil {
+				params = c
 			}
 		case "field_identifier":
 			name = e.text(c)
@@ -227,12 +234,16 @@ func (e *goExtractor) handleMethod(n *sitter.Node) {
 	if name == "" {
 		return
 	}
-	e.recordAndRecurse(n, name, recvType)
+	recvType := goReceiverType(recv, e.file.Source)
+	e.recordAndRecurse(n, name, recvType, params, recv)
 }
 
 // goReceiverType extracts the type name from a method receiver list.
 // `(f *Foo)` → "Foo"; `(Foo)` → "Foo".
 func goReceiverType(paramList *sitter.Node, src []byte) string {
+	if paramList == nil {
+		return ""
+	}
 	for i := 0; i < int(paramList.NamedChildCount()); i++ {
 		decl := paramList.NamedChild(i)
 		if decl.Type() != "parameter_declaration" {
@@ -255,7 +266,7 @@ func goReceiverType(paramList *sitter.Node, src []byte) string {
 	return ""
 }
 
-func (e *goExtractor) recordAndRecurse(defNode *sitter.Node, funcName, receiverType string) {
+func (e *goExtractor) recordAndRecurse(defNode *sitter.Node, funcName, receiverType string, params, recv *sitter.Node) {
 	parts := []string{}
 	if e.modFQN != "" {
 		parts = append(parts, string(e.modFQN))
@@ -274,8 +285,13 @@ func (e *goExtractor) recordAndRecurse(defNode *sitter.Node, funcName, receiverT
 	})
 
 	prevFunc := e.curFunc
+	prevLocals := e.localTypes
 	e.curFunc = fqn
-	defer func() { e.curFunc = prevFunc }()
+	e.localTypes = e.seedLocalTypes(params, recv)
+	defer func() {
+		e.curFunc = prevFunc
+		e.localTypes = prevLocals
+	}()
 
 	body := defNode.ChildByFieldName("body")
 	if body == nil {
@@ -293,6 +309,109 @@ func (e *goExtractor) recordAndRecurse(defNode *sitter.Node, funcName, receiverT
 	}
 }
 
+// seedLocalTypes builds the function's parameter type map. Each entry
+// maps a parameter name to its type FQN (with imports resolved when
+// applicable). The receiver list is treated like a parameter list.
+func (e *goExtractor) seedLocalTypes(params, recv *sitter.Node) map[string]string {
+	out := make(map[string]string)
+	for _, list := range []*sitter.Node{recv, params} {
+		if list == nil {
+			continue
+		}
+		for i := 0; i < int(list.NamedChildCount()); i++ {
+			c := list.NamedChild(i)
+			if c.Type() != "parameter_declaration" {
+				continue
+			}
+			typeFQN := e.goParamTypeFQN(c)
+			if typeFQN == "" {
+				continue
+			}
+			for j := 0; j < int(c.NamedChildCount()); j++ {
+				if id := c.NamedChild(j); id.Type() == "identifier" {
+					out[e.text(id)] = typeFQN
+				}
+			}
+		}
+	}
+	return out
+}
+
+// goParamTypeFQN extracts the FQN of a parameter_declaration's type.
+// Handles type_identifier (same-package), qualified_type
+// (imported pkg.Type), pointer_type wrapping either, and a few common
+// composite forms (slice, array). Returns "" when the type can't be
+// resolved.
+func (e *goExtractor) goParamTypeFQN(decl *sitter.Node) string {
+	for i := 0; i < int(decl.NamedChildCount()); i++ {
+		c := decl.NamedChild(i)
+		switch c.Type() {
+		case "identifier":
+			// Parameter name — skip.
+			continue
+		}
+		if fqn := e.goTypeFQN(c); fqn != "" {
+			return fqn
+		}
+	}
+	return ""
+}
+
+func (e *goExtractor) goTypeFQN(n *sitter.Node) string {
+	switch n.Type() {
+	case "type_identifier":
+		return e.localTypeFQN(e.text(n))
+	case "qualified_type":
+		return e.qualifiedTypeFQN(n)
+	case "pointer_type", "slice_type", "array_type", "channel_type", "parenthesized_type":
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			if fqn := e.goTypeFQN(n.NamedChild(i)); fqn != "" {
+				return fqn
+			}
+		}
+	}
+	return ""
+}
+
+func (e *goExtractor) localTypeFQN(name string) string {
+	if e.modFQN != "" {
+		return string(e.modFQN) + "." + name
+	}
+	return name
+}
+
+func (e *goExtractor) qualifiedTypeFQN(n *sitter.Node) string {
+	var pkg, ty string
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		switch c.Type() {
+		case "package_identifier":
+			pkg = e.text(c)
+		case "type_identifier":
+			ty = e.text(c)
+		}
+	}
+	if pkg == "" || ty == "" {
+		return ""
+	}
+	if mapped, ok := e.imports[pkg]; ok {
+		return string(mapped) + "." + ty
+	}
+	return pkg + "." + ty
+}
+
+// firstChildOfType returns the first named child whose type matches t,
+// or nil.
+func firstChildOfType(n *sitter.Node, t string) *sitter.Node {
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		if c.Type() == t {
+			return c
+		}
+	}
+	return nil
+}
+
 func (e *goExtractor) handleCall(n *sitter.Node) {
 	fn := n.ChildByFieldName("function")
 	if fn == nil {
@@ -300,6 +419,18 @@ func (e *goExtractor) handleCall(n *sitter.Node) {
 	}
 	raw := e.text(fn)
 	resolved := e.resolveCallee(raw)
+	// Receiver-aware resolution: when fn is `selector_expression` whose
+	// operand is a single identifier of a tracked type, prefer
+	// `<typeFQN>.<field>` over the raw-text fallback.
+	if fn.Type() == "selector_expression" {
+		operand := fn.ChildByFieldName("operand")
+		field := fn.ChildByFieldName("field")
+		if operand != nil && field != nil && operand.Type() == "identifier" {
+			if typeFQN, ok := e.localTypes[e.text(operand)]; ok {
+				resolved = FQN(typeFQN + "." + e.text(field))
+			}
+		}
+	}
 	e.g.AddCall(&CallSite{
 		Caller: e.curFunc,
 		Callee: resolved,
