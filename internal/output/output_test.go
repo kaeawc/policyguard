@@ -171,6 +171,83 @@ func TestRender_SARIFFallsBackToFindingsForRules(t *testing.T) {
 	}
 }
 
+func interproceduralFinding() engine.Finding {
+	f := sampleFindings()[0]
+	f.Function = callgraph.FQN("svc.handler.fetch")
+	f.SourceChain = []callgraph.FQN{
+		"svc.handler.fetch",
+		"svc.handler.get_user",
+	}
+	f.SinkChain = []callgraph.FQN{
+		"svc.handler.fetch",
+		"svc.handler.call_llm",
+	}
+	return f
+}
+
+func TestRender_TextShowsChainForInterprocedural(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatText, Args{Findings: []engine.Finding{interproceduralFinding()}}); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{
+		"source path: svc.handler.fetch -> svc.handler.get_user",
+		"sink path:   svc.handler.fetch -> svc.handler.call_llm",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("text missing %q\nhad:\n%s", want, got)
+		}
+	}
+}
+
+func TestRender_TextOmitsChainForIntra(t *testing.T) {
+	f := sampleFindings()[0]
+	f.SourceChain = []callgraph.FQN{f.Function}
+	f.SinkChain = []callgraph.FQN{f.Function}
+
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatText, Args{Findings: []engine.Finding{f}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "source path:") {
+		t.Errorf("intra-procedural finding should not render a chain line\nhad:\n%s", buf.String())
+	}
+}
+
+func TestRender_MarkdownShowsChainForInterprocedural(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatMarkdown, Args{Findings: []engine.Finding{interproceduralFinding()}}); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{
+		"source path: `svc.handler.fetch -> svc.handler.get_user`",
+		"sink path: `svc.handler.fetch -> svc.handler.call_llm`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("markdown missing %q\nhad:\n%s", want, got)
+		}
+	}
+}
+
+func TestRender_JSONIncludesChainsForInterprocedural(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatJSON, Args{Findings: []engine.Finding{interproceduralFinding()}}); err != nil {
+		t.Fatal(err)
+	}
+	var got []jsonFinding
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || len(got[0].SourceChain) != 2 || len(got[0].SinkChain) != 2 {
+		t.Fatalf("got = %+v", got)
+	}
+	if got[0].SourceChain[1] != "svc.handler.get_user" {
+		t.Errorf("SourceChain[1] = %q", got[0].SourceChain[1])
+	}
+}
+
 func TestRender_MarkdownEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	if err := Render(&buf, FormatMarkdown, Args{}); err != nil {
