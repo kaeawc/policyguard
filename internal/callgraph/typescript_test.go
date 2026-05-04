@@ -136,6 +136,69 @@ func TestBuildTypeScript_ClassMethod(t *testing.T) {
 	}
 }
 
+func TestBuildTypeScript_ReceiverTypedParameter(t *testing.T) {
+	src := `import { Redactor } from './redactor';
+
+function summarize(r: Redactor, id: string): string {
+  return r.redact(id);
+}
+`
+	g := BuildTypeScript([]*scanner.File{parseTS(t, src)}, "")
+	calls := g.Calls["x.summarize"]
+	if len(calls) != 1 {
+		t.Fatalf("calls = %+v", calls)
+	}
+	if string(calls[0].Callee) != "./redactor.Redactor.redact" {
+		t.Errorf("Callee = %q, want canonical FQN", calls[0].Callee)
+	}
+}
+
+func TestBuildTypeScript_ReceiverThisMethod(t *testing.T) {
+	src := `class Handler {
+  helper() { return "x"; }
+  run() { return this.helper(); }
+}
+`
+	g := BuildTypeScript([]*scanner.File{parseTS(t, src)}, "")
+	calls := g.Calls["x.Handler.run"]
+	if len(calls) != 1 || string(calls[0].Callee) != "x.Handler.helper" {
+		t.Errorf("calls = %+v", calls)
+	}
+}
+
+func TestBuildTypeScript_ReceiverThisFieldMethod(t *testing.T) {
+	src := `import { Redactor } from './redactor';
+
+class Handler {
+  redactor: Redactor;
+  constructor(r: Redactor) { this.redactor = r; }
+  call(id: string) { return this.redactor.redact(id); }
+}
+`
+	g := BuildTypeScript([]*scanner.File{parseTS(t, src)}, "")
+	calls := g.Calls["x.Handler.call"]
+	if len(calls) != 1 {
+		t.Fatalf("calls = %+v", calls)
+	}
+	if string(calls[0].Callee) != "./redactor.Redactor.redact" {
+		t.Errorf("Callee = %q", calls[0].Callee)
+	}
+}
+
+func TestBuildTypeScript_ReceiverSamePackageType(t *testing.T) {
+	// Type isn't imported (defined in same file), falls back to module-FQN.
+	src := `class Local {
+  run() { return "x"; }
+}
+function f(l: Local) { return l.run(); }
+`
+	g := BuildTypeScript([]*scanner.File{parseTS(t, src)}, "")
+	calls := g.Calls["x.f"]
+	if len(calls) != 1 || string(calls[0].Callee) != "x.Local.run" {
+		t.Errorf("calls = %+v", calls)
+	}
+}
+
 func TestTSModuleFQN(t *testing.T) {
 	tests := []struct {
 		path, root string
