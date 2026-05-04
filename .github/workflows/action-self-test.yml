@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
   compliant:
@@ -29,6 +30,10 @@ jobs:
           policies-dir: examples/policies
           source-dir: tests/fixtures/python/policies/pii_redaction_before_llm/compliant
           comment-on-pr: 'false'
+          # Compliant run still uploads SARIF (zero findings) — proves
+          # the upload path is healthy even when there's nothing to
+          # report.
+          sarif-category: policyguard-self-compliant
 
   violating:
     # Inverts the contract: we expect policyguard to FAIL with the
@@ -43,3 +48,4 @@ jobs:
           source-dir: tests/fixtures/python/policies/pii_redaction_before_llm/violating
           fail-on-findings: 'false'
           comment-on-pr: 'false'
+          sarif-category: policyguard-self-violating
