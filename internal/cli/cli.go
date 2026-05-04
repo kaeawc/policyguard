@@ -92,7 +92,7 @@ func runParse(ctx context.Context, argv []string, stdout, stderr io.Writer) int 
 func runCallgraph(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
 	fset := flag.NewFlagSet("callgraph", flag.ContinueOnError)
 	fset.SetOutput(stderr)
-	lang := fset.String("lang", "python", "source language (python|typescript|go)")
+	lang := fset.String("lang", "python", "source language (python|typescript|go|java)")
 	if err := fset.Parse(argv); err != nil {
 		return 2
 	}
@@ -120,6 +120,8 @@ func runCallgraph(ctx context.Context, argv []string, stdout, stderr io.Writer) 
 		g = callgraph.BuildTypeScript(files, root)
 	case scanner.LangGo:
 		g = callgraph.BuildGo(files, root)
+	case scanner.LangJava:
+		g = callgraph.BuildJava(files, root)
 	default:
 		fmt.Fprintf(stderr, "policyguard: callgraph not implemented for %s\n", *lang)
 		return 1
@@ -137,7 +139,7 @@ func (s *stringSlice) Set(v string) error { *s = append(*s, v); return nil }
 func (c *runChecker) runCheck(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
 	fset := flag.NewFlagSet("check", flag.ContinueOnError)
 	fset.SetOutput(stderr)
-	lang := fset.String("lang", "python", "source language (python|typescript|go)")
+	lang := fset.String("lang", "python", "source language (python|typescript|go|java)")
 	policiesDir := fset.String("policies", "", "directory containing policy YAML files")
 	format := fset.String("format", "text", "output format: text|json|sarif|markdown")
 	var policyFiles stringSlice
@@ -201,6 +203,8 @@ func (c *runChecker) runPipeline(ctx context.Context, srcRoot string, lang scann
 		g = callgraph.BuildTypeScript(files, srcRoot)
 	case scanner.LangGo:
 		g = callgraph.BuildGo(files, srcRoot)
+	case scanner.LangJava:
+		g = callgraph.BuildJava(files, srcRoot)
 	default:
 		fmt.Fprintf(stderr, "policyguard: check not implemented for %s\n", lang)
 		return nil, nil, 1
@@ -306,6 +310,8 @@ func extForLang(lang scanner.Language) []string {
 		return []string{".ts", ".tsx"}
 	case scanner.LangGo:
 		return []string{".go"}
+	case scanner.LangJava:
+		return []string{".java"}
 	default:
 		return nil
 	}

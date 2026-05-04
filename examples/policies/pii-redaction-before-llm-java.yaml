@@ -1,0 +1,26 @@
+# PII redaction before LLM (Java variant)
+#
+# Mirror of pii-redaction-before-llm.yaml with Java-shaped FQNs. The
+# import map maps the import's last segment (the simple class name) to
+# the full path, so `import com.example.redactor.Redactor` makes a
+# static reference to `Redactor` resolve to `com.example.redactor.Redactor`.
+# Variable-of-class-type references (`redactor.redact(...)` where
+# `redactor` is a field/parameter typed as `Redactor`) match via the
+# engine's raw-text fallback — receiver-type tracking is a documented
+# follow-up.
+id: pii-redaction-before-llm-java
+severity: error
+languages: [java]
+source:
+  any_of:
+    - calls: loadUser
+sink:
+  any_of:
+    - calls: client.messagesCreate
+guard:
+  any_of:
+    - calls: redactor.redact
+message: User PII reaches LLM call without passing through redactor.
+fix:
+  level: idiomatic
+  suggestion: "Wrap the user value with {guard}() before {sink.callee} at {sink.path}:{sink.line}."
