@@ -32,8 +32,8 @@ export function summarize(u: any) {
 	if len(calls) != 1 {
 		t.Fatalf("want 1 call, got %d: %+v", len(calls), calls)
 	}
-	if string(calls[0].Callee) != "./redactor.redact" {
-		t.Errorf("Callee = %q, want './redactor.redact'", calls[0].Callee)
+	if string(calls[0].Callee) != "redactor.redact" {
+		t.Errorf("Callee = %q, want 'redactor.redact'", calls[0].Callee)
 	}
 }
 
@@ -64,8 +64,8 @@ export function f() { return scrub(1); }
 	if len(calls) == 0 {
 		t.Fatal("no calls")
 	}
-	if string(calls[0].Callee) != "./redactor.redact" {
-		t.Errorf("Callee = %q, want './redactor.redact' (alias should map to original name)", calls[0].Callee)
+	if string(calls[0].Callee) != "redactor.redact" {
+		t.Errorf("Callee = %q, want 'redactor.redact' (alias should map to original name)", calls[0].Callee)
 	}
 }
 
@@ -79,7 +79,7 @@ export function f() { return logger.info('hi'); }
 	if len(calls) == 0 {
 		t.Fatal("no calls")
 	}
-	if string(calls[0].Callee) != "./logger.default.info" {
+	if string(calls[0].Callee) != "logger.default.info" {
 		t.Errorf("Callee = %q", calls[0].Callee)
 	}
 }
@@ -94,7 +94,7 @@ const summarize = (u: any) => redact(u);
 		t.Fatalf("missing x.summarize; have %v", funcKeys(g))
 	}
 	calls := g.Calls["x.summarize"]
-	if len(calls) != 1 || string(calls[0].Callee) != "./redactor.redact" {
+	if len(calls) != 1 || string(calls[0].Callee) != "redactor.redact" {
 		t.Errorf("calls = %+v", calls)
 	}
 }
@@ -109,7 +109,7 @@ const summarize = function (u) { return redact(u); };
 		t.Fatalf("missing x.summarize; have %v", funcKeys(g))
 	}
 	calls := g.Calls["x.summarize"]
-	if len(calls) != 1 || string(calls[0].Callee) != "./redactor.redact" {
+	if len(calls) != 1 || string(calls[0].Callee) != "redactor.redact" {
 		t.Errorf("calls = %+v", calls)
 	}
 }
@@ -148,7 +148,7 @@ function summarize(r: Redactor, id: string): string {
 	if len(calls) != 1 {
 		t.Fatalf("calls = %+v", calls)
 	}
-	if string(calls[0].Callee) != "./redactor.Redactor.redact" {
+	if string(calls[0].Callee) != "redactor.Redactor.redact" {
 		t.Errorf("Callee = %q, want canonical FQN", calls[0].Callee)
 	}
 }
@@ -180,7 +180,7 @@ class Handler {
 	if len(calls) != 1 {
 		t.Fatalf("calls = %+v", calls)
 	}
-	if string(calls[0].Callee) != "./redactor.Redactor.redact" {
+	if string(calls[0].Callee) != "redactor.Redactor.redact" {
 		t.Errorf("Callee = %q", calls[0].Callee)
 	}
 }
@@ -196,6 +196,59 @@ function f(l: Local) { return l.run(); }
 	calls := g.Calls["x.f"]
 	if len(calls) != 1 || string(calls[0].Callee) != "x.Local.run" {
 		t.Errorf("calls = %+v", calls)
+	}
+}
+
+func TestResolveTSImportSource(t *testing.T) {
+	tests := []struct {
+		source, pkg, want string
+	}{
+		{"./foo", "src", "src.foo"},
+		{"./foo/bar", "src", "src.foo.bar"},
+		{"../lib/util", "src", "lib.util"},
+		{"../../shared/x", "src.sub", "shared.x"},
+		{"./foo.ts", "src", "src.foo"},
+		{"./foo.tsx", "src", "src.foo"},
+		{"pkg", "src", "pkg"},
+		{"@scope/pkg", "src", "@scope/pkg"},
+		{"./foo", "", "foo"},
+	}
+	for _, tc := range tests {
+		got := resolveTSImportSource(tc.source, FQN(tc.pkg))
+		if got != tc.want {
+			t.Errorf("resolveTSImportSource(%q, %q) = %q, want %q", tc.source, tc.pkg, got, tc.want)
+		}
+	}
+}
+
+func TestBuildTypeScript_CrossFileResolution(t *testing.T) {
+	// src/handlers.ts calls redact() imported from ./redactor; the
+	// function `redact` is defined in src/redactor.ts. After path
+	// resolution both sides agree on src.redactor.redact, so the call
+	// graph edge connects them.
+	root := t.TempDir()
+	handler, err := scanner.ParseBytes(context.Background(),
+		root+"/src/handlers.ts", scanner.LangTypeScript,
+		[]byte(`import { redact } from './redactor';
+function f(u: any) { return redact(u); }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redactor, err := scanner.ParseBytes(context.Background(),
+		root+"/src/redactor.ts", scanner.LangTypeScript,
+		[]byte(`export function redact(u: any) { return u; }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := BuildTypeScript([]*scanner.File{handler, redactor}, root)
+	if _, ok := g.Funcs["src.redactor.redact"]; !ok {
+		t.Fatalf("missing src.redactor.redact; have %v", funcKeys(g))
+	}
+	calls := g.Calls["src.handlers.f"]
+	if len(calls) != 1 || string(calls[0].Callee) != "src.redactor.redact" {
+		t.Errorf("calls = %+v, want callee = src.redactor.redact", calls)
 	}
 }
 
