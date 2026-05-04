@@ -51,6 +51,16 @@ type tsExtractor struct {
 	imports map[string]FQN
 	scope   []string
 	curFunc FQN
+	// classFields maps a field's simple name to its declared type
+	// (e.g. "redactor" -> "Redactor"). Populated on entry to a class.
+	classFields map[string]string
+	// classFQN is the FQN of the enclosing class — used to resolve
+	// `this.method()` calls. Empty outside class methods.
+	classFQN FQN
+	// localTypes maps a parameter / variable name to its declared type
+	// FQN. Reset per function. `this` is included when inside a class
+	// method.
+	localTypes map[string]string
 }
 
 func newTSExtractor(g *Graph, f *scanner.File, modFQN FQN) *tsExtractor {
@@ -247,11 +257,16 @@ func (e *tsExtractor) handleExport(n *sitter.Node) {
 func (e *tsExtractor) handleClass(n *sitter.Node) {
 	// class_declaration: type_identifier (name), class_body (members)
 	var name *sitter.Node
+	var body *sitter.Node
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		c := n.NamedChild(i)
-		if c.Type() == "type_identifier" {
-			name = c
-			break
+		switch c.Type() {
+		case "type_identifier":
+			if name == nil {
+				name = c
+			}
+		case "class_body":
+			body = c
 		}
 	}
 	if name == nil {
@@ -259,15 +274,76 @@ func (e *tsExtractor) handleClass(n *sitter.Node) {
 	}
 	className := e.text(name)
 	e.scope = append(e.scope, className)
-	defer func() { e.scope = e.scope[:len(e.scope)-1] }()
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		c := n.NamedChild(i)
-		if c.Type() == "class_body" {
+	prevFields := e.classFields
+	prevClassFQN := e.classFQN
+	e.classFields = e.collectTSFieldTypes(body)
+	e.classFQN = FQN(string(e.modFQN) + "." + className)
+	defer func() {
+		e.scope = e.scope[:len(e.scope)-1]
+		e.classFields = prevFields
+		e.classFQN = prevClassFQN
+	}()
+	if body != nil {
+		for i := 0; i < int(body.NamedChildCount()); i++ {
+			e.walk(body.NamedChild(i))
+		}
+	}
+}
+
+// collectTSFieldTypes walks a class_body and returns the map of field
+// simple-name -> declared type name, drawn from public_field_definition
+// nodes that carry a type_annotation.
+func (e *tsExtractor) collectTSFieldTypes(body *sitter.Node) map[string]string {
+	out := make(map[string]string)
+	if body == nil {
+		return out
+	}
+	for i := 0; i < int(body.NamedChildCount()); i++ {
+		c := body.NamedChild(i)
+		if c.Type() != "public_field_definition" {
+			continue
+		}
+		var name string
+		var typeName string
+		for j := 0; j < int(c.NamedChildCount()); j++ {
+			cc := c.NamedChild(j)
+			switch cc.Type() {
+			case "property_identifier":
+				name = e.text(cc)
+			case "type_annotation":
+				typeName = e.tsTypeName(cc)
+			}
+		}
+		if name != "" && typeName != "" {
+			out[name] = typeName
+		}
+	}
+	return out
+}
+
+// tsTypeName extracts the simple type name from a type_annotation. The
+// annotation's first named child is the actual type node. Generic
+// wrappers (`Foo<T>`) collapse to `Foo`. Returns "" for predefined
+// types (`string`, `number`) since those don't map to imports.
+func (e *tsExtractor) tsTypeName(annotation *sitter.Node) string {
+	if annotation == nil {
+		return ""
+	}
+	for i := 0; i < int(annotation.NamedChildCount()); i++ {
+		c := annotation.NamedChild(i)
+		switch c.Type() {
+		case "type_identifier":
+			return e.text(c)
+		case "generic_type":
+			// First named child of generic_type is the type_identifier.
 			for j := 0; j < int(c.NamedChildCount()); j++ {
-				e.walk(c.NamedChild(j))
+				if id := c.NamedChild(j); id.Type() == "type_identifier" {
+					return e.text(id)
+				}
 			}
 		}
 	}
+	return ""
 }
 
 func (e *tsExtractor) handleMethod(n *sitter.Node) {
@@ -315,10 +391,13 @@ func (e *tsExtractor) recordAndRecurse(defNode *sitter.Node, funcName string) {
 	})
 
 	prevFunc := e.curFunc
+	prevLocals := e.localTypes
 	e.curFunc = fqn
 	e.scope = append(e.scope, funcName)
+	e.localTypes = e.seedTSLocalTypes(defNode)
 	defer func() {
 		e.curFunc = prevFunc
+		e.localTypes = prevLocals
 		e.scope = e.scope[:len(e.scope)-1]
 	}()
 
@@ -371,6 +450,59 @@ func (e *tsExtractor) handleFieldAccess(n *sitter.Node) {
 	})
 }
 
+// seedTSLocalTypes builds the function/method's locals map: typed
+// formal parameters (looked up via tsTypeName), plus `this` when
+// inside a class method.
+func (e *tsExtractor) seedTSLocalTypes(defNode *sitter.Node) map[string]string {
+	out := make(map[string]string)
+	if e.classFQN != "" {
+		out["this"] = string(e.classFQN)
+	}
+	params := firstTSChildOfType(defNode, "formal_parameters")
+	if params == nil {
+		return out
+	}
+	for i := 0; i < int(params.NamedChildCount()); i++ {
+		p := params.NamedChild(i)
+		if p.Type() != "required_parameter" && p.Type() != "optional_parameter" {
+			continue
+		}
+		if name, typeFQN := e.tsParamNameAndTypeFQN(p); name != "" && typeFQN != "" {
+			out[name] = typeFQN
+		}
+	}
+	return out
+}
+
+func (e *tsExtractor) tsParamNameAndTypeFQN(p *sitter.Node) (string, string) {
+	var name, typeName string
+	for j := 0; j < int(p.NamedChildCount()); j++ {
+		c := p.NamedChild(j)
+		switch c.Type() {
+		case "identifier":
+			if name == "" {
+				name = e.text(c)
+			}
+		case "type_annotation":
+			typeName = e.tsTypeName(c)
+		}
+	}
+	if name == "" || typeName == "" {
+		return "", ""
+	}
+	return name, e.tsTypeFQN(typeName)
+}
+
+func firstTSChildOfType(n *sitter.Node, t string) *sitter.Node {
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		if c.Type() == t {
+			return c
+		}
+	}
+	return nil
+}
+
 func (e *tsExtractor) handleCall(n *sitter.Node) {
 	fn := n.ChildByFieldName("function")
 	if fn == nil {
@@ -378,6 +510,11 @@ func (e *tsExtractor) handleCall(n *sitter.Node) {
 	}
 	raw := e.text(fn)
 	resolved := e.resolveCallee(raw)
+	if fn.Type() == "member_expression" {
+		if typed, ok := e.tsResolveMember(fn); ok {
+			resolved = typed
+		}
+	}
 	e.g.AddCall(&CallSite{
 		Caller: e.curFunc,
 		Callee: resolved,
@@ -386,6 +523,52 @@ func (e *tsExtractor) handleCall(n *sitter.Node) {
 		Node:   n,
 		Line:   int(n.StartPoint().Row) + 1,
 	})
+}
+
+// tsResolveMember resolves `<obj>.<prop>` to its canonical FQN when
+// `<obj>` is a tracked variable. Supports:
+//   - identifier:        `r.method()`        → typeFQN(r) + "." + method
+//   - this:              `this.method()`     → classFQN + "." + method
+//   - this.<field>:      `this.f.method()`   → classFields[f] type FQN + "." + method
+func (e *tsExtractor) tsResolveMember(member *sitter.Node) (FQN, bool) {
+	object := member.ChildByFieldName("object")
+	property := member.ChildByFieldName("property")
+	if object == nil || property == nil {
+		return "", false
+	}
+	method := e.text(property)
+	switch object.Type() {
+	case "identifier":
+		if t, ok := e.localTypes[e.text(object)]; ok {
+			return FQN(t + "." + method), true
+		}
+	case "this":
+		if e.classFQN != "" {
+			return FQN(string(e.classFQN) + "." + method), true
+		}
+	case "member_expression":
+		// Handle `this.<field>.method`: object is a member_expression
+		// whose object is `this` and property is a known class field.
+		innerObj := object.ChildByFieldName("object")
+		innerProp := object.ChildByFieldName("property")
+		if innerObj != nil && innerProp != nil && innerObj.Type() == "this" {
+			fieldName := e.text(innerProp)
+			if typeName, ok := e.classFields[fieldName]; ok {
+				typeFQN := e.tsTypeFQN(typeName)
+				return FQN(typeFQN + "." + method), true
+			}
+		}
+	}
+	return "", false
+}
+
+// tsTypeFQN turns a simple type name into its FQN by consulting the
+// import map; falls back to module-local for unmapped names.
+func (e *tsExtractor) tsTypeFQN(typeName string) string {
+	if mapped, ok := e.imports[typeName]; ok {
+		return string(mapped)
+	}
+	return string(e.modFQN) + "." + typeName
 }
 
 // resolveCallee maps a raw callee expression to an FQN using the import
