@@ -240,9 +240,9 @@ func TestExample_PIIRedactionBeforeLLM_Java(t *testing.T) {
 	runExample(t,
 		"examples/policies/pii-redaction-before-llm-java.yaml",
 		"tests/fixtures/java/policies/pii_redaction_before_llm",
-		// Resolved sink callee — `client` isn't an imported simple name
-		// so it falls back to the package-prefixed form.
-		"com.example.app.client.messagesCreate",
+		// Receiver-type tracking resolves `client.messagesCreate` to
+		// the imported class's canonical FQN.
+		"com.example.anthropic.Anthropic.messagesCreate",
 	)
 }
 
