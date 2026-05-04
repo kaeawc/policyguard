@@ -179,6 +179,91 @@ def g():
 	}
 }
 
+func TestBuildPython_RelativeImports(t *testing.T) {
+	// app/handlers.py imports siblings via `.` and a parent-level
+	// module via `..`.
+	src := []byte(`from . import users
+from .helpers import sanitize
+from ..lib import shared
+
+def f():
+    return users.get(1)
+
+def g():
+    return sanitize("x")
+
+def h():
+    return shared.load()
+`)
+	file, err := scanner.ParseBytes(context.Background(), "app/handlers.py", scanner.LangPython, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := BuildPython([]*scanner.File{file}, "")
+
+	want := map[FQN]FQN{
+		"app.handlers.f": "app.users.get",
+		"app.handlers.g": "app.helpers.sanitize",
+		"app.handlers.h": "lib.shared.load",
+	}
+	for caller, wantCallee := range want {
+		calls := g.Calls[caller]
+		if len(calls) != 1 {
+			t.Errorf("%s: got %+v", caller, calls)
+			continue
+		}
+		if calls[0].Callee != wantCallee {
+			t.Errorf("%s callee = %q, want %q", caller, calls[0].Callee, wantCallee)
+		}
+	}
+}
+
+func TestBuildPython_RelativeImportFromInit(t *testing.T) {
+	// In an __init__.py, modFQN == package FQN; `.foo` resolves to
+	// `<package>.foo`.
+	src := []byte(`from . import sibling
+
+def f():
+    return sibling.run()
+`)
+	file, err := scanner.ParseBytes(context.Background(), "app/__init__.py", scanner.LangPython, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := BuildPython([]*scanner.File{file}, "")
+	calls := g.Calls["app.f"]
+	if len(calls) != 1 || calls[0].Callee != "app.sibling.run" {
+		t.Errorf("calls = %+v", calls)
+	}
+}
+
+func TestPythonRelativeBase(t *testing.T) {
+	tests := []struct {
+		pkg    FQN
+		dots   int
+		want   FQN
+		wantOK bool
+	}{
+		{"app", 1, "app", true},
+		{"app.handlers", 1, "app.handlers", true},
+		{"app.handlers", 2, "app", true},
+		{"app.handlers", 3, "", true},  // climbs to root
+		{"app.handlers", 4, "", false}, // climbs past root
+		{"a.b.c", 2, "a.b", true},
+		{"a.b.c", 3, "a", true},
+		{"a.b.c", 4, "", true},
+		{"", 1, "", true},
+		{"", 2, "", false},
+	}
+	for _, tc := range tests {
+		got, ok := pythonRelativeBase(tc.pkg, tc.dots)
+		if got != tc.want || ok != tc.wantOK {
+			t.Errorf("pythonRelativeBase(%q, %d) = (%q, %v), want (%q, %v)",
+				tc.pkg, tc.dots, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
+
 func TestPythonModuleFQN(t *testing.T) {
 	tests := []struct {
 		path, root string

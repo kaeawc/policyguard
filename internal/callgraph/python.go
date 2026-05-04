@@ -43,9 +43,14 @@ func pythonModuleFQN(path, rootDir string) FQN {
 // stack so it can build FQNs for nested defs and resolve `self`-style calls
 // (left as a TODO; methods currently get class-qualified names).
 type pyExtractor struct {
-	g       *Graph
-	file    *scanner.File
-	modFQN  FQN
+	g      *Graph
+	file   *scanner.File
+	modFQN FQN
+	// pkgFQN is the FQN of the package containing this file. For
+	// `app/handlers.py` it is `app`; for `app/__init__.py` it is also
+	// `app` (the file IS the package). Used to resolve relative
+	// imports.
+	pkgFQN  FQN
 	imports map[string]FQN
 	scope   []string // stack of scope segments (class names, function names)
 	// curFunc is the FQN of the innermost enclosing function definition,
@@ -59,8 +64,89 @@ func newPyExtractor(g *Graph, f *scanner.File, modFQN FQN) *pyExtractor {
 		g:       g,
 		file:    f,
 		modFQN:  modFQN,
+		pkgFQN:  pythonPackageFQN(f.Path, modFQN),
 		imports: make(map[string]FQN),
 	}
+}
+
+// pythonPackageFQN returns the package FQN containing this file. For
+// __init__ files the package is the modFQN itself; for module files it
+// is modFQN minus the trailing module name.
+func pythonPackageFQN(path string, modFQN FQN) FQN {
+	if strings.HasSuffix(path, "/__init__.py") || strings.HasSuffix(path, "__init__.py") && !strings.Contains(path, "/") {
+		return modFQN
+	}
+	parts := strings.Split(string(modFQN), ".")
+	if len(parts) <= 1 {
+		return ""
+	}
+	return FQN(strings.Join(parts[:len(parts)-1], "."))
+}
+
+// resolveModuleName returns the absolute dotted module name referenced
+// by an import_from_statement's `module_name` field. Absolute imports
+// (`from app.helpers import ...`) return the dotted_name verbatim.
+// Relative imports (`from .helpers import ...` etc.) are anchored to
+// the file's package: one dot = current package, two dots = parent,
+// and so on. Returns "" when the relative import escapes the project
+// root or the package can't be inferred.
+func (e *pyExtractor) resolveModuleName(module *sitter.Node) string {
+	if module.Type() != "relative_import" {
+		return e.text(module)
+	}
+	var dots int
+	var rest string
+	for i := 0; i < int(module.NamedChildCount()); i++ {
+		c := module.NamedChild(i)
+		switch c.Type() {
+		case "import_prefix":
+			dots = strings.Count(e.text(c), ".")
+		case "dotted_name":
+			rest = e.text(c)
+		}
+	}
+	base, ok := pythonRelativeBase(e.pkgFQN, dots)
+	if !ok {
+		// Climbed past the inferred root — can't resolve.
+		return ""
+	}
+	switch {
+	case rest == "" && base == "":
+		return ""
+	case rest == "":
+		return string(base)
+	case base == "":
+		return rest
+	default:
+		return string(base) + "." + rest
+	}
+}
+
+// pythonRelativeBase returns the package FQN that a relative import
+// with the given dot count anchors against, plus a bool indicating
+// whether the climb stayed within the inferred project. One dot =
+// current package (pkgFQN unchanged); each additional dot pops a
+// segment. Climbing exactly to the root returns "" with ok=true;
+// climbing one level past the root returns "" with ok=false.
+func pythonRelativeBase(pkgFQN FQN, dots int) (FQN, bool) {
+	if dots <= 0 {
+		return pkgFQN, true
+	}
+	pop := dots - 1
+	if pkgFQN == "" {
+		if pop == 0 {
+			return "", true
+		}
+		return "", false
+	}
+	parts := strings.Split(string(pkgFQN), ".")
+	if pop > len(parts) {
+		return "", false
+	}
+	if pop == 0 {
+		return pkgFQN, true
+	}
+	return FQN(strings.Join(parts[:len(parts)-pop], ".")), true
 }
 
 func (e *pyExtractor) walk(n *sitter.Node) {
@@ -188,7 +274,12 @@ func (e *pyExtractor) handleImportFrom(n *sitter.Node) {
 	if module == nil {
 		return
 	}
-	modName := e.text(module)
+	modName := e.resolveModuleName(module)
+	if modName == "" {
+		// Relative import that escapes the project root — skip rather
+		// than mis-resolve.
+		return
+	}
 	// Iterate children; aliased_import or dotted_name nodes after the module.
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		c := n.NamedChild(i)
