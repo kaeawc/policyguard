@@ -25,6 +25,7 @@ func BuildTypeScript(files []*scanner.File, rootDir string) *Graph {
 		modFQN := tsModuleFQN(f.Path, rootDir)
 		ext := newTSExtractor(g, f, modFQN)
 		ext.walk(f.Root())
+		scanComments(g, f)
 	}
 	return g
 }

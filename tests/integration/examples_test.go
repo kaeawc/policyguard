@@ -180,6 +180,16 @@ func TestExample_PIIRedactionBeforeLLM(t *testing.T) {
 		}
 	})
 
+	t.Run("compliant_suppressed", func(t *testing.T) {
+		// `# policyguard: ignore pii-redaction-before-llm` suppresses
+		// the otherwise-violating function.
+		fix := filepath.Join(root, "tests/fixtures/python/policies/pii_redaction_before_llm/compliant_suppressed")
+		findings := runPipeline(t, fix, p)
+		if len(findings) != 0 {
+			t.Errorf("expected no findings (suppressed), got %+v", findings)
+		}
+	})
+
 	t.Run("violating_field_access", func(t *testing.T) {
 		// Source via field_access: "*.email" — function reads user.email
 		// then hands to anthropic without redaction.

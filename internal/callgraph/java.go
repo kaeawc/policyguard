@@ -41,6 +41,7 @@ func BuildJava(files []*scanner.File, rootDir string) *Graph {
 		}
 		ext := newJavaExtractor(g, f)
 		ext.walk(f.Root())
+		scanComments(g, f)
 	}
 	return g
 }
