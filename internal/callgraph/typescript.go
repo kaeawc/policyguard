@@ -46,9 +46,13 @@ func tsModuleFQN(path, rootDir string) FQN {
 }
 
 type tsExtractor struct {
-	g       *Graph
-	file    *scanner.File
-	modFQN  FQN
+	g      *Graph
+	file   *scanner.File
+	modFQN FQN
+	// pkgFQN is the dotted directory containing this file. For
+	// `src/handlers.ts` (modFQN `src.handlers`) it's `src`. Used to
+	// resolve relative imports like `./foo` to a project-rooted FQN.
+	pkgFQN  FQN
 	imports map[string]FQN
 	scope   []string
 	curFunc FQN
@@ -69,8 +73,53 @@ func newTSExtractor(g *Graph, f *scanner.File, modFQN FQN) *tsExtractor {
 		g:       g,
 		file:    f,
 		modFQN:  modFQN,
+		pkgFQN:  tsPackageFQN(modFQN),
 		imports: make(map[string]FQN),
 	}
+}
+
+// tsPackageFQN returns the package FQN containing the file. `src.handlers`
+// → `src`; `src.sub.handlers` → `src.sub`; `lone` → `""`.
+func tsPackageFQN(modFQN FQN) FQN {
+	parts := strings.Split(string(modFQN), ".")
+	if len(parts) <= 1 {
+		return ""
+	}
+	return FQN(strings.Join(parts[:len(parts)-1], "."))
+}
+
+// resolveTSImportSource normalizes a TypeScript import source string to
+// a dotted FQN. Relative paths (`./foo`, `../lib/util`) are anchored
+// against the current file's package FQN; bare/scoped specifiers
+// (`pkg`, `@scope/pkg`) pass through unchanged.
+func resolveTSImportSource(source string, pkgFQN FQN) string {
+	if !strings.HasPrefix(source, "./") && !strings.HasPrefix(source, "../") {
+		return source
+	}
+	segments := strings.Split(source, "/")
+	parts := []string{}
+	if pkgFQN != "" {
+		parts = strings.Split(string(pkgFQN), ".")
+	}
+	for _, seg := range segments {
+		switch seg {
+		case ".", "":
+			// leading or stray "./" — ignore
+		case "..":
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
+			}
+		default:
+			// Strip a trailing extension just in case (most TS imports
+			// omit it, but `./foo.js` happens with explicit-extension
+			// linters). Doesn't impact callee resolution since the
+			// extractor strips extensions when computing modFQN too.
+			seg = strings.TrimSuffix(seg, ".ts")
+			seg = strings.TrimSuffix(seg, ".tsx")
+			parts = append(parts, seg)
+		}
+	}
+	return strings.Join(parts, ".")
 }
 
 func (e *tsExtractor) text(n *sitter.Node) string {
@@ -129,12 +178,18 @@ func (e *tsExtractor) handleImport(n *sitter.Node) {
 	if source == "" {
 		return
 	}
+	resolved := resolveTSImportSource(source, e.pkgFQN)
+	if resolved == "" {
+		// Relative path that climbed past the project root — skip
+		// rather than resolve to an empty prefix.
+		return
+	}
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		c := n.NamedChild(i)
 		if c.Type() != "import_clause" {
 			continue
 		}
-		e.handleImportClause(c, source)
+		e.handleImportClause(c, resolved)
 	}
 }
 
