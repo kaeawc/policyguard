@@ -74,6 +74,12 @@ func renderText(w io.Writer, args Args) error {
 		}
 		if f.Fix != nil {
 			fmt.Fprintf(w, "  fix [%s]: %s\n", f.Fix.Level, f.Fix.Suggestion)
+			if diff := f.Fix.Patch.UnifiedDiff(); diff != "" {
+				fmt.Fprintln(w, "  patch:")
+				for _, line := range strings.Split(strings.TrimRight(diff, "\n"), "\n") {
+					fmt.Fprintf(w, "    %s\n", line)
+				}
+			}
 		}
 	}
 	_, err := fmt.Fprintf(w, "\n%d finding(s)\n", len(args.Findings))
@@ -92,7 +98,17 @@ func fixJSON(fix *engine.FindingFix) *jsonFix {
 	if fix == nil {
 		return nil
 	}
-	return &jsonFix{Level: string(fix.Level), Suggestion: fix.Suggestion}
+	out := &jsonFix{Level: string(fix.Level), Suggestion: fix.Suggestion}
+	if fix.Patch != nil {
+		out.Patch = &jsonPatch{
+			Path:        fix.Patch.Path,
+			Line:        fix.Patch.Line,
+			OldLine:     fix.Patch.OldLine,
+			NewLine:     fix.Patch.NewLine,
+			UnifiedDiff: fix.Patch.UnifiedDiff(),
+		}
+	}
+	return out
 }
 
 // chainHopsJSON flattens a chain to its JSON wire shape. Returns nil
@@ -212,11 +228,23 @@ func renderMarkdownFinding(w io.Writer, f engine.Finding) error {
 		}
 	}
 	if f.Fix != nil {
-		if _, err := fmt.Fprintf(w, "- fix _(%s)_: %s\n", f.Fix.Level, f.Fix.Suggestion); err != nil {
+		if err := renderMarkdownFix(w, f.Fix); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func renderMarkdownFix(w io.Writer, fix *engine.FindingFix) error {
+	if _, err := fmt.Fprintf(w, "- fix _(%s)_: %s\n", fix.Level, fix.Suggestion); err != nil {
+		return err
+	}
+	diff := fix.Patch.UnifiedDiff()
+	if diff == "" {
+		return nil
+	}
+	_, err := fmt.Fprintf(w, "\n```diff\n%s```\n", diff)
+	return err
 }
 
 // ---------------------------------------------------------------- json
@@ -237,8 +265,19 @@ type jsonFinding struct {
 
 // jsonFix is the wire shape for an autofix proposal.
 type jsonFix struct {
-	Level      string `json:"level"`
-	Suggestion string `json:"suggestion"`
+	Level      string     `json:"level"`
+	Suggestion string     `json:"suggestion"`
+	Patch      *jsonPatch `json:"patch,omitempty"`
+}
+
+// jsonPatch carries a single-line edit's pre/post text plus the
+// rendered unified diff.
+type jsonPatch struct {
+	Path        string `json:"path"`
+	Line        int    `json:"line"`
+	OldLine     string `json:"old_line"`
+	NewLine     string `json:"new_line"`
+	UnifiedDiff string `json:"unified_diff"`
 }
 
 // jsonChainHop is the wire shape for a single chain hop. Path/Line are

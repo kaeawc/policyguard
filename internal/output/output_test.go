@@ -347,6 +347,62 @@ func TestRender_JSONIncludesFix(t *testing.T) {
 	}
 }
 
+func TestRender_MarkdownShowsPatchDiff(t *testing.T) {
+	f := sampleFindings()[0]
+	f.Fix = &engine.FindingFix{
+		Level:      policy.FixIdiomatic,
+		Suggestion: "wrap it",
+		Patch: &engine.FindingPatch{
+			Path:    "x.py",
+			Line:    5,
+			OldLine: "    f(user)",
+			NewLine: "    f(redactor.redact(user))",
+		},
+	}
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatMarkdown, Args{Findings: []engine.Finding{f}}); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{
+		"```diff",
+		"-    f(user)",
+		"+    f(redactor.redact(user))",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("markdown missing %q\nhad:\n%s", want, got)
+		}
+	}
+}
+
+func TestRender_JSONIncludesPatch(t *testing.T) {
+	f := sampleFindings()[0]
+	f.Fix = &engine.FindingFix{
+		Level:      policy.FixIdiomatic,
+		Suggestion: "x",
+		Patch: &engine.FindingPatch{
+			Path:    "x.py",
+			Line:    5,
+			OldLine: "f(u)",
+			NewLine: "f(r(u))",
+		},
+	}
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatJSON, Args{Findings: []engine.Finding{f}}); err != nil {
+		t.Fatal(err)
+	}
+	var got []jsonFinding
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got[0].Fix.Patch == nil || got[0].Fix.Patch.NewLine != "f(r(u))" {
+		t.Errorf("Patch = %+v", got[0].Fix.Patch)
+	}
+	if !strings.Contains(got[0].Fix.Patch.UnifiedDiff, "+f(r(u))") {
+		t.Errorf("UnifiedDiff missing +line: %q", got[0].Fix.Patch.UnifiedDiff)
+	}
+}
+
 func TestRender_SARIFIncludesFix(t *testing.T) {
 	f := sampleFindings()[0]
 	f.Fix = &engine.FindingFix{Level: policy.FixIdiomatic, Suggestion: "do x"}

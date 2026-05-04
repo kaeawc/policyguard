@@ -441,6 +441,87 @@ func equalFQNs(a, b []callgraph.FQN) bool {
 	return true
 }
 
+func TestAnalyze_BuildsWrapPatchForPositionalArg(t *testing.T) {
+	// Real Python source so the sink CallSite has a valid AST node.
+	src := []byte(`import anthropic
+
+def f(user_id):
+    user = load_user(user_id)
+    return anthropic.messages.create(user)
+
+def load_user(user_id):
+    return {"id": user_id}
+`)
+	file, err := scanner.ParseBytes(context.Background(), "x.py", scanner.LangPython, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := callgraph.BuildPython([]*scanner.File{file}, "")
+
+	p := basicPolicy()
+	p.Source = policy.Matcher{AnyOf: []policy.Predicate{{Calls: "x.load_user"}}}
+	p.Sink = policy.Matcher{AnyOf: []policy.Predicate{{Calls: "anthropic.messages.create"}}}
+	zero := 0
+	p.Fix = &policy.Fix{
+		Level:        policy.FixIdiomatic,
+		Suggestion:   "wrap it",
+		WrapArgument: &zero,
+	}
+
+	findings := Analyze(g, p)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d", len(findings))
+	}
+	patch := findings[0].Fix.Patch
+	if patch == nil {
+		t.Fatalf("expected patch, got nil")
+	}
+	if patch.NewLine != "    return anthropic.messages.create(redactor.redact(user))" {
+		t.Errorf("NewLine = %q", patch.NewLine)
+	}
+	if patch.Line != 5 {
+		t.Errorf("Line = %d, want 5", patch.Line)
+	}
+	if !strings.Contains(patch.UnifiedDiff(), "+    return anthropic.messages.create(redactor.redact(user))") {
+		t.Errorf("UnifiedDiff missing +line; got %q", patch.UnifiedDiff())
+	}
+}
+
+func TestAnalyze_NoPatchWhenSinkUsesKeywordArgs(t *testing.T) {
+	// All args are keyword args — wrap_argument: 0 has no positional
+	// arg to wrap, so the engine emits the suggestion text but no Patch.
+	src := []byte(`import anthropic
+
+def f(user_id):
+    user = load_user(user_id)
+    return anthropic.messages.create(model="x", input=user)
+
+def load_user(user_id):
+    return {}
+`)
+	file, err := scanner.ParseBytes(context.Background(), "x.py", scanner.LangPython, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := callgraph.BuildPython([]*scanner.File{file}, "")
+	p := basicPolicy()
+	p.Source = policy.Matcher{AnyOf: []policy.Predicate{{Calls: "x.load_user"}}}
+	p.Sink = policy.Matcher{AnyOf: []policy.Predicate{{Calls: "anthropic.messages.create"}}}
+	zero := 0
+	p.Fix = &policy.Fix{
+		Level:        policy.FixIdiomatic,
+		Suggestion:   "wrap it",
+		WrapArgument: &zero,
+	}
+	findings := Analyze(g, p)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d", len(findings))
+	}
+	if findings[0].Fix.Patch != nil {
+		t.Errorf("expected no patch (only kwargs); got %+v", findings[0].Fix.Patch)
+	}
+}
+
 func TestAnalyze_RendersFixTemplate(t *testing.T) {
 	g := callgraph.NewGraph()
 	f := fakeFile("svc/h.py")

@@ -32,6 +32,8 @@ import (
 	"strconv"
 	"strings"
 
+	sitter "github.com/smacker/go-tree-sitter"
+
 	"github.com/kaeawc/policyguard/internal/callgraph"
 	"github.com/kaeawc/policyguard/internal/policy"
 )
@@ -68,6 +70,45 @@ type Finding struct {
 type FindingFix struct {
 	Level      policy.FixLevel
 	Suggestion string
+	// Patch describes a structured edit derived from the policy's
+	// fix.wrap_argument directive. Nil when the policy didn't request
+	// a patch or the engine couldn't extract the target argument.
+	Patch *FindingPatch
+}
+
+// FindingPatch is a single-file, single-line code edit. The original
+// line at Path:Line is replaced with NewText. Multi-line edits and
+// cross-file edits are out of scope for the MVP — when those become
+// needed, this type can grow.
+type FindingPatch struct {
+	Path    string
+	Line    int
+	OldLine string
+	NewLine string
+}
+
+// UnifiedDiff renders the patch as a unified-diff hunk so callers can
+// hand it to `patch -p0` or display inline in PR comments. Returns ""
+// when the patch is empty or no-op.
+func (p *FindingPatch) UnifiedDiff() string {
+	if p == nil || p.OldLine == p.NewLine {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("--- a/")
+	b.WriteString(p.Path)
+	b.WriteString("\n+++ b/")
+	b.WriteString(p.Path)
+	b.WriteString("\n@@ -")
+	b.WriteString(strconv.Itoa(p.Line))
+	b.WriteString(",1 +")
+	b.WriteString(strconv.Itoa(p.Line))
+	b.WriteString(",1 @@\n-")
+	b.WriteString(p.OldLine)
+	b.WriteString("\n+")
+	b.WriteString(p.NewLine)
+	b.WriteString("\n")
+	return b.String()
 }
 
 // ChainHop is one step in a counterexample chain. Function is the FQN
@@ -141,13 +182,14 @@ func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 		sites := collectSites(g, closures[fqn])
 		fields := collectFields(g, closures[fqn])
 		decorators := collectDecorators(g, closures[fqn])
-		f, srcCarrier, sinkCarrier, ok := evaluate(p, sites, fields, decorators, fqn)
+		ev, ok := evaluate(p, sites, fields, decorators, fqn)
 		if !ok {
 			continue
 		}
-		f.SourceChain = chainHops(shortestPath(fqn, srcCarrier, callees), bridges)
-		f.SinkChain = chainHops(shortestPath(fqn, sinkCarrier, callees), bridges)
-		f.Fix = renderFix(p, f)
+		f := ev.finding
+		f.SourceChain = chainHops(shortestPath(fqn, ev.srcCarrier, callees), bridges)
+		f.SinkChain = chainHops(shortestPath(fqn, ev.sinkCarrier, callees), bridges)
+		f.Fix = renderFix(p, f, ev.sinkCall)
 		violators[fqn] = f
 	}
 
@@ -188,18 +230,21 @@ func analyzeModuleScope(g *callgraph.Graph, p *policy.Policy) []Finding {
 	if len(sites) == 0 && len(fields) == 0 {
 		return nil
 	}
-	f, _, _, ok := evaluate(p, sites, fields, nil, "")
+	ev, ok := evaluate(p, sites, fields, nil, "")
 	if !ok {
 		return nil
 	}
-	f.Fix = renderFix(p, f)
+	f := ev.finding
+	f.Fix = renderFix(p, f, ev.sinkCall)
 	return []Finding{f}
 }
 
 // renderFix renders the policy's fix template into the finding. Returns
 // nil if the policy has no fix block. Substitution is a flat string
 // replace over a small set of placeholders documented on policy.Fix.
-func renderFix(p *policy.Policy, f Finding) *FindingFix {
+// When the policy declares a fix.wrap_argument and the sink is a call
+// site, an attached Patch describes the suggested edit.
+func renderFix(p *policy.Policy, f Finding, sinkCall *callgraph.CallSite) *FindingFix {
 	if p.Fix == nil {
 		return nil
 	}
@@ -218,10 +263,146 @@ func renderFix(p *policy.Policy, f Finding) *FindingFix {
 		"{sink.line}", strconv.Itoa(f.Sink.Line),
 		"{guard}", firstGuardValue(p.Guard),
 	)
-	return &FindingFix{
+	out := &FindingFix{
 		Level:      level,
 		Suggestion: r.Replace(p.Fix.Suggestion),
 	}
+	if p.Fix.WrapArgument != nil && sinkCall != nil {
+		guardCall := firstGuardCallValue(p.Guard)
+		if guardCall != "" {
+			out.Patch = buildWrapPatch(sinkCall, *p.Fix.WrapArgument, guardCall)
+		}
+	}
+	return out
+}
+
+// firstGuardCallValue returns the first `calls` predicate in the
+// matcher (decorators don't make sense as wrap targets). Returns ""
+// when the matcher has none.
+func firstGuardCallValue(m policy.Matcher) string {
+	for _, pred := range m.AnyOf {
+		if pred.Kind() == "calls" {
+			return pred.Calls
+		}
+	}
+	return ""
+}
+
+// buildWrapPatch attempts to rewrite the sink call site so its Nth
+// positional argument is wrapped with guardCall. Returns nil when the
+// sink is not a call_expression-like node, the argument index is out of
+// range, or the source bytes can't be located. The patch is line-
+// scoped — multi-line argument expressions aren't supported in this
+// MVP.
+func buildWrapPatch(sink *callgraph.CallSite, argIdx int, guardCall string) *FindingPatch {
+	if sink == nil || sink.Node == nil || sink.File == nil {
+		return nil
+	}
+	args := findArgumentList(sink.Node)
+	if args == nil {
+		return nil
+	}
+	arg := nthPositionalArg(args, argIdx)
+	if arg == nil {
+		return nil
+	}
+	src := sink.File.Source
+	startByte := arg.StartByte()
+	endByte := arg.EndByte()
+	if int(startByte) >= len(src) || int(endByte) > len(src) || startByte >= endByte {
+		return nil
+	}
+	if arg.StartPoint().Row != arg.EndPoint().Row {
+		// Multi-line argument expression — skip rather than emit a
+		// busted single-line patch.
+		return nil
+	}
+	argText := string(src[startByte:endByte])
+	wrapped := guardCall + "(" + argText + ")"
+
+	line := int(arg.StartPoint().Row) + 1
+	oldLine, ok := lineAt(src, line)
+	if !ok {
+		return nil
+	}
+	col := int(arg.StartPoint().Column)
+	if col+len(argText) > len(oldLine) {
+		return nil
+	}
+	newLine := oldLine[:col] + wrapped + oldLine[col+len(argText):]
+	return &FindingPatch{
+		Path:    sink.File.Path,
+		Line:    line,
+		OldLine: oldLine,
+		NewLine: newLine,
+	}
+}
+
+// findArgumentList returns the argument-list child of a call node.
+// Tree-sitter grammars use different node names for the args wrapper
+// (Python: `argument_list`; TypeScript: `arguments`; Go:
+// `argument_list`; Java: `argument_list`).
+func findArgumentList(n *sitter.Node) *sitter.Node {
+	for _, name := range []string{"argument_list", "arguments"} {
+		if a := n.ChildByFieldName("arguments"); a != nil && (a.Type() == name) {
+			return a
+		}
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		if c.Type() == "argument_list" || c.Type() == "arguments" {
+			return c
+		}
+	}
+	return nil
+}
+
+// nthPositionalArg returns the Nth positional argument node from an
+// argument-list, skipping non-positional forms (Python keyword
+// arguments, named TS/JS object-property shorthands aren't a thing in
+// argument lists, but we play defensively).
+func nthPositionalArg(args *sitter.Node, idx int) *sitter.Node {
+	pos := 0
+	for i := 0; i < int(args.NamedChildCount()); i++ {
+		c := args.NamedChild(i)
+		switch c.Type() {
+		case "keyword_argument":
+			// Python `name=value` — not positional.
+			continue
+		}
+		if pos == idx {
+			return c
+		}
+		pos++
+	}
+	return nil
+}
+
+// lineAt returns the (1-based) given line of src as a string, without
+// the trailing newline. Returns false if line is out of range.
+func lineAt(src []byte, line int) (string, bool) {
+	if line <= 0 {
+		return "", false
+	}
+	cur := 1
+	start := 0
+	for i := 0; i < len(src); i++ {
+		if cur == line {
+			end := i
+			for end < len(src) && src[end] != '\n' {
+				end++
+			}
+			return string(src[start:end]), true
+		}
+		if src[i] == '\n' {
+			cur++
+			start = i + 1
+		}
+	}
+	if cur == line {
+		return string(src[start:]), true
+	}
+	return "", false
 }
 
 // firstGuardValue picks a representative value from the guard matcher
@@ -289,31 +470,47 @@ func matcherMatchesDecorators(m policy.Matcher, decorators []string) bool {
 	return false
 }
 
+// evaluation bundles everything an analysis pass needs to know about a
+// matched (source, sink) pair: the rendered finding shell, the carrier
+// FQNs (for chain reconstruction), and the matched sink site itself
+// (for structured patch generation when the policy declares one).
+type evaluation struct {
+	finding     Finding
+	srcCarrier  callgraph.FQN
+	sinkCarrier callgraph.FQN
+	sinkCall    *callgraph.CallSite // nil if sink was matched by field access
+}
+
 // evaluate applies the source/guard/sink check across all evidence kinds
 // available at this scope: call sites, field-access sites, and the
-// decorators present on functions in the closure. Returns the finding,
-// the carrier FQNs of the matched source/sink (the function whose body
-// holds each), and whether it violates the policy.
-func evaluate(p *policy.Policy, sites []*callgraph.CallSite, fields []*callgraph.FieldAccess, decorators []string, caller callgraph.FQN) (Finding, callgraph.FQN, callgraph.FQN, bool) {
+// decorators present on functions in the closure. Returns ok=false when
+// the policy doesn't fire.
+func evaluate(p *policy.Policy, sites []*callgraph.CallSite, fields []*callgraph.FieldAccess, decorators []string, caller callgraph.FQN) (evaluation, bool) {
 	if guardSatisfied(p.Guard, sites, fields, decorators) {
-		return Finding{}, "", "", false
+		return evaluation{}, false
 	}
 	src, srcSite, srcCarrier := firstMatchAny(p.Source, sites, fields)
 	if src == nil {
-		return Finding{}, "", "", false
+		return evaluation{}, false
 	}
 	sink, sinkSite, sinkCarrier := firstMatchAny(p.Sink, sites, fields)
 	if sink == nil {
-		return Finding{}, "", "", false
+		return evaluation{}, false
 	}
-	return Finding{
-		PolicyID: p.ID,
-		Severity: p.Severity,
-		Message:  p.Message,
-		Function: displayCaller(caller),
-		Source:   srcSite,
-		Sink:     sinkSite,
-	}, srcCarrier, sinkCarrier, true
+	sinkCall, _ := sink.(*callgraph.CallSite)
+	return evaluation{
+		finding: Finding{
+			PolicyID: p.ID,
+			Severity: p.Severity,
+			Message:  p.Message,
+			Function: displayCaller(caller),
+			Source:   srcSite,
+			Sink:     sinkSite,
+		},
+		srcCarrier:  srcCarrier,
+		sinkCarrier: sinkCarrier,
+		sinkCall:    sinkCall,
+	}, true
 }
 
 // guardSatisfied reports whether the guard matcher fires against the
