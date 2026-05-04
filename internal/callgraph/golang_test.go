@@ -2,6 +2,7 @@ package callgraph
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/kaeawc/policyguard/internal/scanner"
@@ -144,18 +145,95 @@ func F() float64 { return Pi }
 
 func TestGoModuleFQN(t *testing.T) {
 	tests := []struct {
-		path, root string
-		want       FQN
+		path, root, mod string
+		want            FQN
 	}{
-		{"cmd/server/main.go", "", "cmd.server"},
-		{"/repo/cmd/server/main.go", "/repo", "cmd.server"},
-		{"/repo/main.go", "/repo", ""},
+		// Legacy dot-form (no go.mod available)
+		{"cmd/server/main.go", "", "", "cmd.server"},
+		{"/repo/cmd/server/main.go", "/repo", "", "cmd.server"},
+		{"/repo/main.go", "/repo", "", ""},
+		// Module-rooted form when go.mod is present
+		{"/repo/cmd/server/main.go", "/repo", "github.com/me/proj", "github.com/me/proj/cmd/server"},
+		{"/repo/main.go", "/repo", "github.com/me/proj", "github.com/me/proj"},
 	}
 	for _, tc := range tests {
-		got := goModuleFQN(tc.path, tc.root)
+		got := goModuleFQN(tc.path, tc.root, tc.mod)
 		if got != tc.want {
-			t.Errorf("goModuleFQN(%q, %q) = %q, want %q", tc.path, tc.root, got, tc.want)
+			t.Errorf("goModuleFQN(%q, %q, %q) = %q, want %q", tc.path, tc.root, tc.mod, got, tc.want)
 		}
+	}
+}
+
+func TestParseGoModFile(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/go.mod"
+	body := `module github.com/me/proj
+
+go 1.25.0
+require example.com/foo v1.0.0
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := parseGoModFile(path); got != "github.com/me/proj" {
+		t.Errorf("parseGoModFile = %q", got)
+	}
+	// Missing file → empty string, not an error.
+	if got := parseGoModFile(dir + "/no-such.mod"); got != "" {
+		t.Errorf("missing file: got %q", got)
+	}
+}
+
+func TestFindGoModulePath_AncestorWalk(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/go.mod", []byte("module example.com/abc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := root + "/cmd/server"
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := findGoModulePath(sub); got != "example.com/abc" {
+		t.Errorf("findGoModulePath = %q", got)
+	}
+}
+
+func TestBuildGo_CrossFileResolutionWithGoMod(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/go.mod", []byte("module example.com/proj\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root+"/handler", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root+"/redactor", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := scanner.ParseBytes(context.Background(),
+		root+"/handler/handler.go", scanner.LangGo,
+		[]byte(`package handler
+import "example.com/proj/redactor"
+func F(x string) string { return redactor.Redact(x) }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redactorFile, err := scanner.ParseBytes(context.Background(),
+		root+"/redactor/redactor.go", scanner.LangGo,
+		[]byte(`package redactor
+func Redact(x string) string { return x }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := BuildGo([]*scanner.File{handler, redactorFile}, root)
+	want := FQN("example.com/proj/redactor.Redact")
+	if _, ok := g.Funcs[want]; !ok {
+		t.Fatalf("missing %q; have %v", want, funcKeys(g))
+	}
+	calls := g.Calls["example.com/proj/handler.F"]
+	if len(calls) != 1 || calls[0].Callee != want {
+		t.Errorf("calls = %+v, want callee = %q", calls, want)
 	}
 }
 
