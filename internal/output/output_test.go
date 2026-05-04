@@ -301,6 +301,71 @@ func TestRender_MarkdownMultipleFindingsSeparator(t *testing.T) {
 	}
 }
 
+func TestRender_TextShowsFix(t *testing.T) {
+	f := sampleFindings()[0]
+	f.Fix = &engine.FindingFix{
+		Level:      policy.FixIdiomatic,
+		Suggestion: "Wrap the user object in redactor.redact.",
+	}
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatText, Args{Findings: []engine.Finding{f}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "fix [idiomatic]: Wrap the user object in redactor.redact.") {
+		t.Errorf("text missing fix line\nhad:\n%s", buf.String())
+	}
+}
+
+func TestRender_MarkdownShowsFix(t *testing.T) {
+	f := sampleFindings()[0]
+	f.Fix = &engine.FindingFix{
+		Level:      policy.FixIdiomatic,
+		Suggestion: "Wrap user in redactor.redact.",
+	}
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatMarkdown, Args{Findings: []engine.Finding{f}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "- fix _(idiomatic)_: Wrap user in redactor.redact.") {
+		t.Errorf("markdown missing fix bullet\nhad:\n%s", buf.String())
+	}
+}
+
+func TestRender_JSONIncludesFix(t *testing.T) {
+	f := sampleFindings()[0]
+	f.Fix = &engine.FindingFix{Level: policy.FixIdiomatic, Suggestion: "x"}
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatJSON, Args{Findings: []engine.Finding{f}}); err != nil {
+		t.Fatal(err)
+	}
+	var got []jsonFinding
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Fix == nil || got[0].Fix.Suggestion != "x" {
+		t.Errorf("got = %+v", got)
+	}
+}
+
+func TestRender_SARIFIncludesFix(t *testing.T) {
+	f := sampleFindings()[0]
+	f.Fix = &engine.FindingFix{Level: policy.FixIdiomatic, Suggestion: "do x"}
+	var buf bytes.Buffer
+	if err := Render(&buf, FormatSARIF, Args{Findings: []engine.Finding{f}}); err != nil {
+		t.Fatal(err)
+	}
+	var log sarifLog
+	if err := json.Unmarshal(buf.Bytes(), &log); err != nil {
+		t.Fatal(err)
+	}
+	if len(log.Runs[0].Results) != 1 || len(log.Runs[0].Results[0].Fixes) != 1 {
+		t.Fatalf("expected one fix, got %+v", log.Runs[0].Results)
+	}
+	if log.Runs[0].Results[0].Fixes[0].Description.Text != "do x" {
+		t.Errorf("Fixes[0].Description = %+v", log.Runs[0].Results[0].Fixes[0].Description)
+	}
+}
+
 func TestRender_UnknownFormatErrors(t *testing.T) {
 	var buf bytes.Buffer
 	err := Render(&buf, Format("xml"), Args{})

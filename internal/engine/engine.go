@@ -29,6 +29,7 @@ package engine
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/kaeawc/policyguard/internal/callgraph"
@@ -57,6 +58,16 @@ type Finding struct {
 	// Module-scope findings (Function == "<module>") have nil chains.
 	SourceChain []ChainHop
 	SinkChain   []ChainHop
+
+	// Fix is the rendered autofix suggestion attached by the policy's
+	// fix template. Nil when the policy has no fix block.
+	Fix *FindingFix
+}
+
+// FindingFix is the rendered autofix proposal for a finding.
+type FindingFix struct {
+	Level      policy.FixLevel
+	Suggestion string
 }
 
 // ChainHop is one step in a counterexample chain. Function is the FQN
@@ -115,6 +126,7 @@ func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 		}
 		f.SourceChain = chainHops(shortestPath(fqn, srcCarrier, callees), bridges)
 		f.SinkChain = chainHops(shortestPath(fqn, sinkCarrier, callees), bridges)
+		f.Fix = renderFix(p, f)
 		violators[fqn] = f
 	}
 
@@ -159,7 +171,51 @@ func analyzeModuleScope(g *callgraph.Graph, p *policy.Policy) []Finding {
 	if !ok {
 		return nil
 	}
+	f.Fix = renderFix(p, f)
 	return []Finding{f}
+}
+
+// renderFix renders the policy's fix template into the finding. Returns
+// nil if the policy has no fix block. Substitution is a flat string
+// replace over a small set of placeholders documented on policy.Fix.
+func renderFix(p *policy.Policy, f Finding) *FindingFix {
+	if p.Fix == nil {
+		return nil
+	}
+	level := p.Fix.Level
+	if level == "" {
+		level = policy.FixIdiomatic
+	}
+	r := strings.NewReplacer(
+		"{policy.id}", p.ID,
+		"{function}", string(f.Function),
+		"{source.callee}", string(f.Source.Callee),
+		"{source.path}", f.Source.Path,
+		"{source.line}", strconv.Itoa(f.Source.Line),
+		"{sink.callee}", string(f.Sink.Callee),
+		"{sink.path}", f.Sink.Path,
+		"{sink.line}", strconv.Itoa(f.Sink.Line),
+		"{guard}", firstGuardValue(p.Guard),
+	)
+	return &FindingFix{
+		Level:      level,
+		Suggestion: r.Replace(p.Fix.Suggestion),
+	}
+}
+
+// firstGuardValue picks a representative value from the guard matcher
+// for use in fix templates: first calls predicate value, otherwise
+// first has_decorator value with `@` prefix, otherwise empty.
+func firstGuardValue(m policy.Matcher) string {
+	for _, pred := range m.AnyOf {
+		switch pred.Kind() {
+		case "calls":
+			return pred.Calls
+		case "has_decorator":
+			return pred.HasDecorator
+		}
+	}
+	return ""
 }
 
 // collectFields returns the union of field-access sites across every

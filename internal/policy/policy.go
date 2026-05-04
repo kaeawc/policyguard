@@ -48,7 +48,37 @@ type Policy struct {
 	Sink      Matcher    `yaml:"sink"`
 	Guard     Matcher    `yaml:"guard"`
 	Message   string     `yaml:"message"`
+	Fix       *Fix       `yaml:"fix,omitempty"`
 }
+
+// Fix is an optional autofix descriptor. The suggestion is a text
+// template that the engine renders into each Finding using simple
+// `{placeholder}` substitution. Supported placeholders:
+//
+//	{policy.id}
+//	{function}
+//	{source.callee}, {source.path}, {source.line}
+//	{sink.callee}, {sink.path}, {sink.line}
+//	{guard}   — first guard predicate's value, prefixed `@` for
+//	            has_decorator predicates; empty if guard has no
+//	            predicates.
+type Fix struct {
+	// Level is the autofix safety tier. Defaults to "idiomatic".
+	// Future: "cosmetic" (whitespace-only) and "semantic" (behavior-
+	// changing, opt-in) are reserved.
+	Level FixLevel `yaml:"level,omitempty"`
+	// Suggestion is the human-readable fix proposal. Required.
+	Suggestion string `yaml:"suggestion"`
+}
+
+// FixLevel indicates how disruptive the fix is.
+type FixLevel string
+
+const (
+	FixIdiomatic FixLevel = "idiomatic"
+	FixCosmetic  FixLevel = "cosmetic"
+	FixSemantic  FixLevel = "semantic"
+)
 
 // Matcher is a disjunction of predicates. The MVP only supports any_of;
 // future versions may add all_of and not.
@@ -169,28 +199,11 @@ func Parse(r io.Reader) (*Policy, error) {
 // Validate returns the first structural error in the policy, or nil if it
 // is well-formed.
 func (p *Policy) Validate() error {
-	if p.ID == "" {
-		return errors.New("id: required")
+	if err := validateIDAndSeverity(p); err != nil {
+		return err
 	}
-	if !idPattern.MatchString(p.ID) {
-		return fmt.Errorf("id: %q must match %s", p.ID, idPattern)
-	}
-	switch p.Severity {
-	case SeverityError, SeverityWarning, SeverityInfo:
-	case "":
-		return errors.New("severity: required (error|warning|info)")
-	default:
-		return fmt.Errorf("severity: %q must be error|warning|info", p.Severity)
-	}
-	if len(p.Languages) == 0 {
-		return errors.New("languages: at least one required")
-	}
-	for _, lang := range p.Languages {
-		switch lang {
-		case LangPython, LangTypeScript, LangGo, LangJava:
-		default:
-			return fmt.Errorf("languages: %q is not a supported language", lang)
-		}
+	if err := validateLanguages(p.Languages); err != nil {
+		return err
 	}
 	if err := validateMatcher("source", p.Source); err != nil {
 		return err
@@ -203,6 +216,54 @@ func (p *Policy) Validate() error {
 	}
 	if p.Message == "" {
 		return errors.New("message: required")
+	}
+	if p.Fix != nil {
+		return validateFix(p.Fix)
+	}
+	return nil
+}
+
+func validateIDAndSeverity(p *Policy) error {
+	if p.ID == "" {
+		return errors.New("id: required")
+	}
+	if !idPattern.MatchString(p.ID) {
+		return fmt.Errorf("id: %q must match %s", p.ID, idPattern)
+	}
+	switch p.Severity {
+	case SeverityError, SeverityWarning, SeverityInfo:
+		return nil
+	case "":
+		return errors.New("severity: required (error|warning|info)")
+	default:
+		return fmt.Errorf("severity: %q must be error|warning|info", p.Severity)
+	}
+}
+
+func validateLanguages(langs []Language) error {
+	if len(langs) == 0 {
+		return errors.New("languages: at least one required")
+	}
+	for _, lang := range langs {
+		switch lang {
+		case LangPython, LangTypeScript, LangGo, LangJava:
+		default:
+			return fmt.Errorf("languages: %q is not a supported language", lang)
+		}
+	}
+	return nil
+}
+
+func validateFix(f *Fix) error {
+	if f.Suggestion == "" {
+		return errors.New("fix.suggestion: required when fix is set")
+	}
+	switch f.Level {
+	case "":
+		f.Level = FixIdiomatic
+	case FixCosmetic, FixIdiomatic, FixSemantic:
+	default:
+		return fmt.Errorf("fix.level: %q must be cosmetic|idiomatic|semantic", f.Level)
 	}
 	return nil
 }

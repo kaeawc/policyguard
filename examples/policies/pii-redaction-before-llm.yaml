@@ -24,3 +24,6 @@ guard:
     - calls: app.redactor.redact
     - has_decorator: "@redacted"
 message: User PII reaches LLM call without passing through redactor.
+fix:
+  level: idiomatic
+  suggestion: "Wrap the user value in {guard}() before passing it to {sink.callee} at {sink.path}:{sink.line}."
