@@ -1,0 +1,7 @@
+# Wire service A's `rpc.post` client call to service B's `handle_llm`
+# handler so reachability continues across the service boundary. The
+# `from` value matches the resolved callee FQN, falling back to raw
+# text if the resolver couldn't pin it.
+edges:
+  - from: rpc.post
+    to: service_b.handler.handle_llm

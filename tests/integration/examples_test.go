@@ -15,6 +15,7 @@ import (
 	"github.com/kaeawc/policyguard/internal/engine"
 	"github.com/kaeawc/policyguard/internal/policy"
 	"github.com/kaeawc/policyguard/internal/scanner"
+	"github.com/kaeawc/policyguard/internal/servicemap"
 )
 
 // repoRoot returns the path to the repository root, derived from the
@@ -254,6 +255,72 @@ func TestExample_PIIRedactionBeforeLLM_Java(t *testing.T) {
 		// the imported class's canonical FQN.
 		"com.example.anthropic.Anthropic.messagesCreate",
 	)
+}
+
+func TestExample_CrossServicePII(t *testing.T) {
+	// Without the service map, service A and service B's call graphs
+	// are disjoint and the policy doesn't fire. With the map, the rpc
+	// client call bridges into service B's handler and the LLM sink
+	// becomes reachable from service A's source.
+	root := repoRoot(t)
+	p, err := policy.Load(filepath.Join(root, "examples/policies/cross-service-pii.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fix := filepath.Join(root, "tests/fixtures/python/policies/cross_service/needs_servicemap")
+
+	if got := runPipeline(t, fix, p); len(got) != 0 {
+		t.Errorf("without service map: expected 0 findings, got %+v", got)
+	}
+
+	smap, err := servicemap.Load(filepath.Join(root, "examples/service-maps/cross-service.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := runPipelineWithMap(t, fix, p, smap)
+	if len(got) != 1 {
+		t.Fatalf("with service map: findings = %d, want 1: %+v", len(got), got)
+	}
+	if !strings.Contains(string(got[0].Function), "fetch_user") {
+		t.Errorf("violator function = %q, want contains fetch_user", got[0].Function)
+	}
+}
+
+// runPipelineWithMap mirrors runPipeline but applies a service map to
+// the call graph before analyzing. Used by TestExample_CrossServicePII.
+func runPipelineWithMap(t *testing.T, srcDir string, p *policy.Policy, smap *servicemap.Map) []engine.Finding {
+	t.Helper()
+	files := walkPyFiles(t, srcDir)
+	g := callgraph.BuildPython(files, srcDir)
+	servicemap.Apply(g, smap)
+	return engine.Analyze(g, p)
+}
+
+// walkPyFiles is a small helper used only by the cross-service test
+// (the main runPipeline already does the equivalent for any language;
+// this one is locked to Python because the cross-service fixture is
+// Python-only).
+func walkPyFiles(t *testing.T, srcDir string) []*scanner.File {
+	t.Helper()
+	var files []*scanner.File
+	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".py") {
+			return nil
+		}
+		f, perr := scanner.ParseFile(context.Background(), path, scanner.LangPython)
+		if perr != nil {
+			return perr
+		}
+		files = append(files, f)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	return files
 }
 
 func TestExample_PathConfinement(t *testing.T) {
