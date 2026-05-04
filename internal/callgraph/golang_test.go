@@ -111,6 +111,77 @@ func (h *Handler) helper() string { return "x" }
 	}
 }
 
+func TestBuildGo_TypeInferenceFromShortVarDecl(t *testing.T) {
+	// `r := makeRedactor()` infers r as *redactor.Redactor (return type
+	// of makeRedactor) so `r.Redact(x)` resolves to the canonical FQN.
+	src := `package handler
+import "example.com/redactor"
+func makeRedactor() *redactor.Redactor { return nil }
+func F() string {
+    r := makeRedactor()
+    return r.Redact("x")
+}
+`
+	g := BuildGo([]*scanner.File{parseGo(t, "handler/handler.go", src)}, "")
+	calls := g.Calls["handler.F"]
+	var rRedact *CallSite
+	for _, c := range calls {
+		if c.Raw == "r.Redact" {
+			rRedact = c
+		}
+	}
+	if rRedact == nil {
+		t.Fatalf("missing r.Redact; got %+v", calls)
+	}
+	if string(rRedact.Callee) != "example.com/redactor.Redactor.Redact" {
+		t.Errorf("Callee = %q", rRedact.Callee)
+	}
+}
+
+func TestBuildGo_TypeInferenceSamePackageReturn(t *testing.T) {
+	src := `package handler
+type Local struct{}
+func make() *Local { return nil }
+func F() string {
+    l := make()
+    return l.Run()
+}
+`
+	g := BuildGo([]*scanner.File{parseGo(t, "handler/handler.go", src)}, "")
+	calls := g.Calls["handler.F"]
+	for _, c := range calls {
+		if c.Raw == "l.Run" {
+			if string(c.Callee) != "handler.Local.Run" {
+				t.Errorf("Callee = %q, want handler.Local.Run", c.Callee)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing l.Run; calls = %+v", calls)
+}
+
+func TestBuildGo_TypeInferenceSkipsMultiReturn(t *testing.T) {
+	// Multi-return (Local, error) doesn't yield an inference; the
+	// `l.Run()` call falls back to raw text resolution.
+	src := `package handler
+type Local struct{}
+func make() (*Local, error) { return nil, nil }
+func F() string {
+    l, _ := make()
+    return l.Run()
+}
+`
+	g := BuildGo([]*scanner.File{parseGo(t, "handler/handler.go", src)}, "")
+	for _, c := range g.Calls["handler.F"] {
+		if c.Raw == "l.Run" {
+			if string(c.Callee) == "handler.Local.Run" {
+				t.Errorf("Callee = %q (multi-return should not infer)", c.Callee)
+			}
+			return
+		}
+	}
+}
+
 func TestBuildGo_ReceiverTypedSamePackageType(t *testing.T) {
 	// Parameter type is in the same package; resolves to <pkg>.<TypeName>.<method>.
 	src := `package handler

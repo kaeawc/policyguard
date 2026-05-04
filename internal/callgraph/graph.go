@@ -104,6 +104,10 @@ type FuncNode struct {
 	// `auth.required`; for `@cache(maxsize=10)` it is `cache` — the
 	// expression text up to the call's function.
 	Decorators []string
+	// ReturnTypeFQN is the canonical type FQN this function returns,
+	// when known. Used by extractors to infer the type of a local
+	// declared as `r := f()`. Empty for void/unknown/multi-return.
+	ReturnTypeFQN string
 }
 
 // CallSite is a single call expression observed in a function body (or at
