@@ -384,14 +384,28 @@ func TestAnalyze_ChainsForInterprocedural(t *testing.T) {
 		t.Fatalf("findings = %d", len(findings))
 	}
 	got := findings[0]
-	wantSrc := []callgraph.FQN{fetch, getU}
-	wantSink := []callgraph.FQN{fetch, callL}
-	if !equalFQNs(got.SourceChain, wantSrc) {
-		t.Errorf("SourceChain = %v, want %v", got.SourceChain, wantSrc)
+	if got := chainFuncs(got.SourceChain); !equalFQNs(got, []callgraph.FQN{fetch, getU}) {
+		t.Errorf("SourceChain functions = %v", got)
 	}
-	if !equalFQNs(got.SinkChain, wantSink) {
-		t.Errorf("SinkChain = %v, want %v", got.SinkChain, wantSink)
+	if got := chainFuncs(got.SinkChain); !equalFQNs(got, []callgraph.FQN{fetch, callL}) {
+		t.Errorf("SinkChain functions = %v", got)
 	}
+	// Bridge metadata: each hop except the last carries the call-site
+	// path/line where this function calls the next one.
+	if got.SourceChain[0].Path == "" || got.SourceChain[0].Line == 0 {
+		t.Errorf("SourceChain[0] missing bridge: %+v", got.SourceChain[0])
+	}
+	if got.SourceChain[1].Path != "" || got.SourceChain[1].Line != 0 {
+		t.Errorf("SourceChain[last] should have no bridge: %+v", got.SourceChain[1])
+	}
+}
+
+func chainFuncs(chain []ChainHop) []callgraph.FQN {
+	out := make([]callgraph.FQN, len(chain))
+	for i, h := range chain {
+		out[i] = h.Function
+	}
+	return out
 }
 
 func TestAnalyze_ChainsForIntraprocedural(t *testing.T) {
@@ -407,11 +421,11 @@ func TestAnalyze_ChainsForIntraprocedural(t *testing.T) {
 		t.Fatalf("findings = %d", len(findings))
 	}
 	want := []callgraph.FQN{fn}
-	if !equalFQNs(findings[0].SourceChain, want) {
-		t.Errorf("SourceChain = %v, want %v", findings[0].SourceChain, want)
+	if got := chainFuncs(findings[0].SourceChain); !equalFQNs(got, want) {
+		t.Errorf("SourceChain = %v", got)
 	}
-	if !equalFQNs(findings[0].SinkChain, want) {
-		t.Errorf("SinkChain = %v, want %v", findings[0].SinkChain, want)
+	if got := chainFuncs(findings[0].SinkChain); !equalFQNs(got, want) {
+		t.Errorf("SinkChain = %v", got)
 	}
 }
 

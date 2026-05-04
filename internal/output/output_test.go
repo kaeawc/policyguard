@@ -174,13 +174,13 @@ func TestRender_SARIFFallsBackToFindingsForRules(t *testing.T) {
 func interproceduralFinding() engine.Finding {
 	f := sampleFindings()[0]
 	f.Function = callgraph.FQN("svc.handler.fetch")
-	f.SourceChain = []callgraph.FQN{
-		"svc.handler.fetch",
-		"svc.handler.get_user",
+	f.SourceChain = []engine.ChainHop{
+		{Function: "svc.handler.fetch", Path: "svc/handler.py", Line: 5},
+		{Function: "svc.handler.get_user"},
 	}
-	f.SinkChain = []callgraph.FQN{
-		"svc.handler.fetch",
-		"svc.handler.call_llm",
+	f.SinkChain = []engine.ChainHop{
+		{Function: "svc.handler.fetch", Path: "svc/handler.py", Line: 6},
+		{Function: "svc.handler.call_llm"},
 	}
 	return f
 }
@@ -192,8 +192,8 @@ func TestRender_TextShowsChainForInterprocedural(t *testing.T) {
 	}
 	got := buf.String()
 	for _, want := range []string{
-		"source path: svc.handler.fetch -> svc.handler.get_user",
-		"sink path:   svc.handler.fetch -> svc.handler.call_llm",
+		"source path: svc.handler.fetch (svc/handler.py:5) -> svc.handler.get_user",
+		"sink path:   svc.handler.fetch (svc/handler.py:6) -> svc.handler.call_llm",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("text missing %q\nhad:\n%s", want, got)
@@ -203,8 +203,8 @@ func TestRender_TextShowsChainForInterprocedural(t *testing.T) {
 
 func TestRender_TextOmitsChainForIntra(t *testing.T) {
 	f := sampleFindings()[0]
-	f.SourceChain = []callgraph.FQN{f.Function}
-	f.SinkChain = []callgraph.FQN{f.Function}
+	f.SourceChain = []engine.ChainHop{{Function: f.Function}}
+	f.SinkChain = []engine.ChainHop{{Function: f.Function}}
 
 	var buf bytes.Buffer
 	if err := Render(&buf, FormatText, Args{Findings: []engine.Finding{f}}); err != nil {
@@ -222,8 +222,8 @@ func TestRender_MarkdownShowsChainForInterprocedural(t *testing.T) {
 	}
 	got := buf.String()
 	for _, want := range []string{
-		"source path: `svc.handler.fetch -> svc.handler.get_user`",
-		"sink path: `svc.handler.fetch -> svc.handler.call_llm`",
+		"source path: `svc.handler.fetch` ([svc/handler.py:5](svc/handler.py#L5)) → `svc.handler.get_user`",
+		"sink path: `svc.handler.fetch` ([svc/handler.py:6](svc/handler.py#L6)) → `svc.handler.call_llm`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("markdown missing %q\nhad:\n%s", want, got)
@@ -243,8 +243,11 @@ func TestRender_JSONIncludesChainsForInterprocedural(t *testing.T) {
 	if len(got) != 1 || len(got[0].SourceChain) != 2 || len(got[0].SinkChain) != 2 {
 		t.Fatalf("got = %+v", got)
 	}
-	if got[0].SourceChain[1] != "svc.handler.get_user" {
-		t.Errorf("SourceChain[1] = %q", got[0].SourceChain[1])
+	if got[0].SourceChain[0].Function != "svc.handler.fetch" || got[0].SourceChain[0].Line != 5 {
+		t.Errorf("SourceChain[0] = %+v", got[0].SourceChain[0])
+	}
+	if got[0].SourceChain[1].Function != "svc.handler.get_user" {
+		t.Errorf("SourceChain[1] = %+v", got[0].SourceChain[1])
 	}
 }
 
