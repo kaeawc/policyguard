@@ -1,6 +1,8 @@
 package callgraph
 
 import (
+	"bufio"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -31,15 +33,22 @@ import (
 //     fixture uses an import path that aligns with the module FQN
 //     derived from rootDir.
 //
-// rootDir is used to derive package FQNs from file paths: an .go file
-// at <rootDir>/cmd/server/main.go produces FQN prefix "cmd.server".
+// rootDir is used to derive package FQNs from file paths. When rootDir
+// (or any ancestor) contains a go.mod, the module path declared there
+// is used as the FQN prefix and the directory parts use slash
+// separators — so a file at <root>/cmd/server/main.go in module
+// `github.com/me/proj` produces FQN prefix
+// `github.com/me/proj/cmd/server`. Without a go.mod, the legacy dot-
+// separated form (`cmd.server`) is used, which is enough for
+// fixtures and self-contained tests.
 func BuildGo(files []*scanner.File, rootDir string) *Graph {
 	g := NewGraph()
+	modulePath := findGoModulePath(rootDir)
 	for _, f := range files {
 		if f.Language != scanner.LangGo {
 			continue
 		}
-		modFQN := goModuleFQN(f.Path, rootDir)
+		modFQN := goModuleFQN(f.Path, rootDir, modulePath)
 		ext := newGoExtractor(g, f, modFQN)
 		ext.walk(f.Root())
 		scanComments(g, f)
@@ -47,11 +56,11 @@ func BuildGo(files []*scanner.File, rootDir string) *Graph {
 	return g
 }
 
-// goModuleFQN derives a module FQN from the file's directory.
-// `cmd/server/main.go` (under root) → `cmd.server`. A top-level file
-// (e.g. root/main.go) yields the empty FQN, which the extractor
-// special-cases below.
-func goModuleFQN(path, rootDir string) FQN {
+// goModuleFQN derives a module FQN from the file's directory. When a
+// modulePath is provided (read from go.mod), the FQN uses slash
+// separators (`<modulePath>/<rel-dir>`); otherwise it falls back to
+// the dot-separated form (`<rel-dir-with-dots>`).
+func goModuleFQN(path, rootDir, modulePath string) FQN {
 	clean := filepath.Clean(path)
 	if rootDir != "" {
 		if rel, err := filepath.Rel(rootDir, clean); err == nil && !strings.HasPrefix(rel, "..") {
@@ -60,10 +69,70 @@ func goModuleFQN(path, rootDir string) FQN {
 	}
 	dir := filepath.Dir(clean)
 	if dir == "." {
+		dir = ""
+	}
+	if modulePath != "" {
+		dirSlash := filepath.ToSlash(dir)
+		if dirSlash == "" {
+			return FQN(modulePath)
+		}
+		return FQN(modulePath + "/" + dirSlash)
+	}
+	if dir == "" {
 		return ""
 	}
 	parts := strings.Split(dir, string(filepath.Separator))
 	return FQN(strings.Join(parts, "."))
+}
+
+// findGoModulePath walks up from rootDir looking for a go.mod and
+// returns its declared module path. Empty string means no go.mod was
+// found or the file couldn't be parsed — callers fall back to the
+// directory-based FQN form.
+func findGoModulePath(rootDir string) string {
+	if rootDir == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(rootDir)
+	if err != nil {
+		return ""
+	}
+	dir := abs
+	for {
+		modPath := parseGoModFile(filepath.Join(dir, "go.mod"))
+		if modPath != "" {
+			return modPath
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// parseGoModFile reads a go.mod at the given path and returns the
+// `module ...` declaration's path. Returns "" on any error or when no
+// module line is present.
+func parseGoModFile(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanr := bufio.NewScanner(f)
+	for scanr.Scan() {
+		line := strings.TrimSpace(scanr.Text())
+		if !strings.HasPrefix(line, "module ") && line != "module" {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "module"))
+		rest = strings.Trim(rest, "\"")
+		if rest != "" {
+			return rest
+		}
+	}
+	return ""
 }
 
 type goExtractor struct {
