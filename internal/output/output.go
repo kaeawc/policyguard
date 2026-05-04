@@ -72,6 +72,9 @@ func renderText(w io.Writer, args Args) error {
 		if isInterprocedural(f.SinkChain) {
 			fmt.Fprintf(w, "  sink path:   %s\n", joinChain(f.SinkChain))
 		}
+		if f.Fix != nil {
+			fmt.Fprintf(w, "  fix [%s]: %s\n", f.Fix.Level, f.Fix.Suggestion)
+		}
 	}
 	_, err := fmt.Fprintf(w, "\n%d finding(s)\n", len(args.Findings))
 	return err
@@ -82,6 +85,14 @@ func renderText(w io.Writer, args Args) error {
 // doesn't add information).
 func isInterprocedural(chain []engine.ChainHop) bool {
 	return len(chain) > 1
+}
+
+// fixJSON converts a *FindingFix to its wire shape, or nil for absent.
+func fixJSON(fix *engine.FindingFix) *jsonFix {
+	if fix == nil {
+		return nil
+	}
+	return &jsonFix{Level: string(fix.Level), Suggestion: fix.Suggestion}
 }
 
 // chainHopsJSON flattens a chain to its JSON wire shape. Returns nil
@@ -200,6 +211,11 @@ func renderMarkdownFinding(w io.Writer, f engine.Finding) error {
 			return err
 		}
 	}
+	if f.Fix != nil {
+		if _, err := fmt.Fprintf(w, "- fix _(%s)_: %s\n", f.Fix.Level, f.Fix.Suggestion); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -216,6 +232,13 @@ type jsonFinding struct {
 	Sink        jsonSite        `json:"sink"`
 	SourceChain []jsonChainHop  `json:"source_chain,omitempty"`
 	SinkChain   []jsonChainHop  `json:"sink_chain,omitempty"`
+	Fix         *jsonFix        `json:"fix,omitempty"`
+}
+
+// jsonFix is the wire shape for an autofix proposal.
+type jsonFix struct {
+	Level      string `json:"level"`
+	Suggestion string `json:"suggestion"`
 }
 
 // jsonChainHop is the wire shape for a single chain hop. Path/Line are
@@ -252,6 +275,7 @@ func renderJSON(w io.Writer, args Args) error {
 			},
 			SourceChain: chainHopsJSON(f.SourceChain),
 			SinkChain:   chainHopsJSON(f.SinkChain),
+			Fix:         fixJSON(f.Fix),
 		})
 	}
 	enc := json.NewEncoder(w)
@@ -306,6 +330,14 @@ type sarifResult struct {
 	Message          sarifMessage    `json:"message"`
 	Locations        []sarifLocation `json:"locations"`
 	RelatedLocations []sarifLocation `json:"relatedLocations,omitempty"`
+	Fixes            []sarifFix      `json:"fixes,omitempty"`
+}
+
+// sarifFix is the SARIF 2.1 fix object. Only `description` is
+// populated for now — actual code rewrites would go into
+// `artifactChanges`.
+type sarifFix struct {
+	Description sarifMessage `json:"description"`
 }
 
 type sarifLocation struct {
@@ -330,7 +362,7 @@ func renderSARIF(w io.Writer, args Args) error {
 	rules := buildSARIFRules(args.Policies, args.Findings)
 	results := make([]sarifResult, 0, len(args.Findings))
 	for _, f := range args.Findings {
-		results = append(results, sarifResult{
+		r := sarifResult{
 			RuleID:  f.PolicyID,
 			Level:   sarifLevel(f.Severity),
 			Message: sarifMessage{Text: f.Message},
@@ -348,7 +380,13 @@ func renderSARIF(w io.Writer, args Args) error {
 				},
 				Message: &sarifMessage{Text: "sink: " + string(f.Sink.Callee)},
 			}},
-		})
+		}
+		if f.Fix != nil {
+			r.Fixes = []sarifFix{{
+				Description: sarifMessage{Text: f.Fix.Suggestion},
+			}}
+		}
+		results = append(results, r)
 	}
 	log := sarifLog{
 		Schema:  "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/Schemata/sarif-schema-2.1.0.json",

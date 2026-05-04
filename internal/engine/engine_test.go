@@ -441,6 +441,51 @@ func equalFQNs(a, b []callgraph.FQN) bool {
 	return true
 }
 
+func TestAnalyze_RendersFixTemplate(t *testing.T) {
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/h.py")
+	const fn callgraph.FQN = "svc.h.fetch"
+	g.AddFunc(&callgraph.FuncNode{FQN: fn, File: f, Line: 1})
+	g.AddCall(fakeCall(fn, "user_repo.get_user", f, 2))
+	g.AddCall(fakeCall(fn, "anthropic.messages.create", f, 3))
+
+	p := basicPolicy()
+	p.Fix = &policy.Fix{
+		Level:      policy.FixIdiomatic,
+		Suggestion: "Wrap the user object in {guard} before {sink.callee} at line {sink.line}.",
+	}
+
+	findings := Analyze(g, p)
+	if len(findings) != 1 || findings[0].Fix == nil {
+		t.Fatalf("findings = %+v", findings)
+	}
+	got := findings[0].Fix.Suggestion
+	want := "Wrap the user object in redactor.redact before anthropic.messages.create at line 3."
+	if got != want {
+		t.Errorf("Suggestion = %q\nwant %q", got, want)
+	}
+	if findings[0].Fix.Level != policy.FixIdiomatic {
+		t.Errorf("Level = %q", findings[0].Fix.Level)
+	}
+}
+
+func TestAnalyze_NoFixWhenPolicyOmitsFix(t *testing.T) {
+	g := callgraph.NewGraph()
+	f := fakeFile("svc/h.py")
+	const fn callgraph.FQN = "svc.h.fetch"
+	g.AddFunc(&callgraph.FuncNode{FQN: fn, File: f, Line: 1})
+	g.AddCall(fakeCall(fn, "user_repo.get_user", f, 2))
+	g.AddCall(fakeCall(fn, "anthropic.messages.create", f, 3))
+
+	findings := Analyze(g, basicPolicy())
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d", len(findings))
+	}
+	if findings[0].Fix != nil {
+		t.Errorf("expected nil Fix, got %+v", findings[0].Fix)
+	}
+}
+
 func TestAnalyze_HandlesCycles(t *testing.T) {
 	// a -> b -> a (cycle). a has the source, b has the sink. The
 	// closure walker must terminate.

@@ -70,6 +70,70 @@ func TestLoad_Valid(t *testing.T) {
 	}
 }
 
+func TestLoad_FixDefaultsToIdiomatic(t *testing.T) {
+	body := `
+id: t
+severity: error
+languages: [python]
+source: {any_of: [{calls: a}]}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+message: m
+fix:
+  suggestion: "Insert {guard} before {sink.callee}."
+`
+	p, err := Parse(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if p.Fix == nil {
+		t.Fatal("Fix nil")
+	}
+	if p.Fix.Level != FixIdiomatic {
+		t.Errorf("Level = %q, want idiomatic", p.Fix.Level)
+	}
+	if p.Fix.Suggestion == "" {
+		t.Error("Suggestion empty")
+	}
+}
+
+func TestLoad_FixRejectsBadLevel(t *testing.T) {
+	body := `
+id: t
+severity: error
+languages: [python]
+source: {any_of: [{calls: a}]}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+message: m
+fix:
+  level: aggressive
+  suggestion: "x"
+`
+	_, err := Parse(strings.NewReader(body))
+	if err == nil || !strings.Contains(err.Error(), "fix.level") {
+		t.Fatalf("expected fix.level error, got %v", err)
+	}
+}
+
+func TestLoad_FixRequiresSuggestion(t *testing.T) {
+	body := `
+id: t
+severity: error
+languages: [python]
+source: {any_of: [{calls: a}]}
+sink: {any_of: [{calls: b}]}
+guard: {any_of: [{calls: c}]}
+message: m
+fix:
+  level: idiomatic
+`
+	_, err := Parse(strings.NewReader(body))
+	if err == nil || !strings.Contains(err.Error(), "fix.suggestion") {
+		t.Fatalf("expected fix.suggestion error, got %v", err)
+	}
+}
+
 func TestParse_Errors(t *testing.T) {
 	tests := []struct {
 		name    string
