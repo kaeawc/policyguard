@@ -88,6 +88,16 @@ For each function `F`, build the **closure**: `F` plus every function transitive
 - **sarif** — SARIF 2.1.0 for GitHub code scanning, IDE viewers, etc.
 - **markdown** — PR-comment-friendly with clickable file:line links
 
+## Editor integration (LSP)
+
+`cmd/policyguard-lsp` is a stdio LSP server that publishes findings as inline diagnostics. Configure your editor to launch it with the policy directory:
+
+```bash
+policyguard-lsp --policies .policies --lang python
+```
+
+The server re-runs analysis on `textDocument/didSave` (and `didOpen`); `didChange` is accepted but ignored — saving refreshes the report. Use it from VS Code, Neovim, Helix, etc. via their generic LSP client config.
+
 ## GitHub Action
 
 ```yaml
