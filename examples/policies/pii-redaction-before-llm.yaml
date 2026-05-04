@@ -27,3 +27,7 @@ message: User PII reaches LLM call without passing through redactor.
 fix:
   level: idiomatic
   suggestion: "Wrap the user value in {guard}() before passing it to {sink.callee} at {sink.path}:{sink.line}."
+  # Sink is called positionally; wrap argument 0 with the guard call.
+  # When the sink uses keyword args (e.g. anthropic.messages.create's
+  # `input=user`), this won't apply — keyword-arg wrapping is a follow-up.
+  wrap_argument: 0

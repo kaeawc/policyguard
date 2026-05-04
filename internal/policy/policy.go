@@ -62,6 +62,11 @@ type Policy struct {
 //	{guard}   — first guard predicate's value, prefixed `@` for
 //	            has_decorator predicates; empty if guard has no
 //	            predicates.
+//
+// When WrapArgument is set, the engine attempts to produce a structured
+// patch: it locates the sink call site's Nth positional argument and
+// rewrites it to `{guard}(<original-arg>)`. The guard call name comes
+// from the first `calls` predicate in the policy's guard matcher.
 type Fix struct {
 	// Level is the autofix safety tier. Defaults to "idiomatic".
 	// Future: "cosmetic" (whitespace-only) and "semantic" (behavior-
@@ -69,6 +74,10 @@ type Fix struct {
 	Level FixLevel `yaml:"level,omitempty"`
 	// Suggestion is the human-readable fix proposal. Required.
 	Suggestion string `yaml:"suggestion"`
+	// WrapArgument, when non-nil, instructs the engine to produce a
+	// structured patch wrapping the sink call's Nth positional argument
+	// with the policy's guard call. Zero-based; nil means no patch.
+	WrapArgument *int `yaml:"wrap_argument,omitempty"`
 }
 
 // FixLevel indicates how disruptive the fix is.
@@ -264,6 +273,9 @@ func validateFix(f *Fix) error {
 	case FixCosmetic, FixIdiomatic, FixSemantic:
 	default:
 		return fmt.Errorf("fix.level: %q must be cosmetic|idiomatic|semantic", f.Level)
+	}
+	if f.WrapArgument != nil && *f.WrapArgument < 0 {
+		return fmt.Errorf("fix.wrap_argument: %d must be >= 0", *f.WrapArgument)
 	}
 	return nil
 }
