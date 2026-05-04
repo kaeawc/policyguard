@@ -1,8 +1,9 @@
 name: policyguard
 description: >
   Run policyguard policies against a source tree and (optionally) post the
-  findings as a PR comment. The same Go binary is used as `policyguard
-  check` locally — the action just wraps build + run + comment.
+  findings as a PR comment AND upload them as SARIF for GitHub code
+  scanning so they show up inline on the PR diff. The SARIF upload step
+  requires the calling workflow to grant `security-events: write`.
 author: kaeawc
 branding:
   icon: shield
@@ -33,6 +34,21 @@ inputs:
       creates a new comment.
     required: false
     default: 'true'
+  upload-sarif:
+    description: >
+      Upload findings as a SARIF report so they appear inline on the
+      PR diff via GitHub code scanning. Requires the calling workflow
+      to grant `security-events: write`. Set to "false" if your
+      repository doesn't have code scanning enabled.
+    required: false
+    default: 'true'
+  sarif-category:
+    description: >
+      Category passed to upload-sarif. Lets multiple policyguard runs
+      (e.g. one per language) coexist on the same PR without
+      overwriting each other.
+    required: false
+    default: policyguard
   github-token:
     description: Token used for the PR-comment API calls. Defaults to GITHUB_TOKEN.
     required: false
@@ -65,7 +81,7 @@ runs:
         fi
         echo "$RUNNER_TEMP/policyguard-bin" >> "$GITHUB_PATH"
 
-    - name: Run policyguard
+    - name: Run policyguard (markdown)
       id: run
       shell: bash
       env:
@@ -87,6 +103,38 @@ runs:
         echo "findings_file=$out" >> "$GITHUB_OUTPUT"
         cat "$out"
         exit 0
+
+    - name: Run policyguard (SARIF)
+      if: ${{ inputs.upload-sarif == 'true' }}
+      id: sarif
+      shell: bash
+      env:
+        POLICIES_DIR: ${{ inputs.policies-dir }}
+        SOURCE_DIR: ${{ inputs.source-dir }}
+        LANG: ${{ inputs.lang }}
+      run: |
+        # Run a second time with --format sarif. Re-running is cheap
+        # compared to threading two outputs out of one binary
+        # invocation; keeps the action.yml composable.
+        set +e
+        sarif="$RUNNER_TEMP/policyguard.sarif"
+        policyguard check \
+          --policies "$POLICIES_DIR" \
+          --lang "$LANG" \
+          --format sarif \
+          "$SOURCE_DIR" > "$sarif"
+        # SARIF emission is independent of finding count — non-zero
+        # exit just means there were findings, which is fine for the
+        # report. Suppress here so the upload step still runs.
+        echo "sarif_file=$sarif" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Upload SARIF
+      if: ${{ inputs.upload-sarif == 'true' }}
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ steps.sarif.outputs.sarif_file }}
+        category: ${{ inputs.sarif-category }}
 
     - name: Post PR comment
       if: ${{ inputs.comment-on-pr == 'true' && github.event_name == 'pull_request' }}
