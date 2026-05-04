@@ -1,0 +1,15 @@
+# Cross-service PII policy: source in service A, sink in service B,
+# wired together by examples/service-maps/cross-service.yaml.
+id: cross-service-pii
+severity: error
+languages: [python]
+source:
+  any_of:
+    - calls: service_a.handler.load_user
+sink:
+  any_of:
+    - calls: anthropic.messages.create
+guard:
+  any_of:
+    - calls: redactor.redact
+message: User PII reaches LLM call across a service boundary without redaction.

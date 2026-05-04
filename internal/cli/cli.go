@@ -18,6 +18,7 @@ import (
 	"github.com/kaeawc/policyguard/internal/output"
 	"github.com/kaeawc/policyguard/internal/policy"
 	"github.com/kaeawc/policyguard/internal/scanner"
+	"github.com/kaeawc/policyguard/internal/servicemap"
 )
 
 // runChecker holds CLI dependencies that runCheck threads through to the
@@ -144,6 +145,7 @@ func (c *runChecker) runCheck(ctx context.Context, argv []string, stdout, stderr
 	policiesDir := fset.String("policies", "", "directory containing policy YAML files")
 	format := fset.String("format", "text", "output format: text|json|sarif|markdown")
 	apply := fset.Bool("apply", false, "apply structured patches in place (modifies files)")
+	serviceMap := fset.String("service-map", "", "service-map YAML for cross-service reachability")
 	var policyFiles stringSlice
 	fset.Var(&policyFiles, "policy", "single policy file (repeatable)")
 	if err := fset.Parse(argv); err != nil {
@@ -169,7 +171,12 @@ func (c *runChecker) runCheck(ctx context.Context, argv []string, stdout, stderr
 		return 2
 	}
 
-	allFindings, applicable, code := c.runPipeline(ctx, dirs[0], scanner.Language(*lang), policies, stderr)
+	smap, code := loadServiceMap(*serviceMap, stderr)
+	if code != 0 {
+		return code
+	}
+
+	allFindings, applicable, code := c.runPipeline(ctx, dirs[0], scanner.Language(*lang), policies, smap, stderr)
 	if code != 0 {
 		return code
 	}
@@ -291,11 +298,25 @@ func applyFilePatches(stderr io.Writer, path string, patches []pendingPatch) (ok
 	return true, applied
 }
 
-// runPipeline parses srcRoot, builds the call graph, and runs every
-// language-applicable policy through the engine. Returns the merged
-// findings, the applicable policies (for SARIF rules), and a non-zero
-// exit code on parse/build error.
-func (c *runChecker) runPipeline(ctx context.Context, srcRoot string, lang scanner.Language, policies []*policy.Policy, stderr io.Writer) ([]engine.Finding, []*policy.Policy, int) {
+// loadServiceMap returns the parsed service map, or nil when path is
+// empty, plus a non-zero exit code on parse error.
+func loadServiceMap(path string, stderr io.Writer) (*servicemap.Map, int) {
+	if path == "" {
+		return nil, 0
+	}
+	m, err := servicemap.Load(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "policyguard: %v\n", err)
+		return nil, 2
+	}
+	return m, 0
+}
+
+// runPipeline parses srcRoot, builds the call graph, applies any
+// service map, and runs every language-applicable policy through the
+// engine. Returns the merged findings, the applicable policies (for
+// SARIF rules), and a non-zero exit code on parse/build error.
+func (c *runChecker) runPipeline(ctx context.Context, srcRoot string, lang scanner.Language, policies []*policy.Policy, smap *servicemap.Map, stderr io.Writer) ([]engine.Finding, []*policy.Policy, int) {
 	files, err := loadSourceDir(ctx, srcRoot, lang)
 	if err != nil {
 		fmt.Fprintf(stderr, "policyguard: %v\n", err)
@@ -315,6 +336,7 @@ func (c *runChecker) runPipeline(ctx context.Context, srcRoot string, lang scann
 		fmt.Fprintf(stderr, "policyguard: check not implemented for %s\n", lang)
 		return nil, nil, 1
 	}
+	servicemap.Apply(g, smap)
 	var allFindings []engine.Finding
 	var applicable []*policy.Policy
 	for _, p := range policies {
