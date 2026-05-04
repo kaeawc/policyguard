@@ -1,4 +1,4 @@
-.PHONY: build test vet lint fmt complexity security tidy ci clean all check-fixtures
+.PHONY: build build-lsp test vet lint fmt complexity security tidy ci clean all check-fixtures
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS = -s -w -X main.version=$(VERSION)
@@ -6,6 +6,9 @@ BIN ?= policyguard
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/policyguard/
+
+build-lsp:
+	go build -ldflags "$(LDFLAGS)" -o policyguard-lsp ./cmd/policyguard-lsp/
 
 test:
 	go test ./... -count=1
@@ -31,7 +34,7 @@ tidy:
 ci: vet test complexity lint security
 
 clean:
-	rm -f $(BIN) junit-report.xml gosec-report.xml
+	rm -f $(BIN) policyguard-lsp junit-report.xml gosec-report.xml
 
 all: build vet test
 

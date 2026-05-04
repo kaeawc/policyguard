@@ -27,6 +27,7 @@ doubt about call-graph internals or cross-file index design, study
 
 - `cmd/policyguard/` — CLI entry point (`parse`, `callgraph`, `check`,
   `version`).
+- `cmd/policyguard-lsp/` — LSP server binary; stdio JSON-RPC.
 - `internal/cli/` — flag parsing, top-level dispatch.
 - `internal/scanner/` — tree-sitter parsers for Python, TypeScript, Go,
   Java.
@@ -48,6 +49,9 @@ doubt about call-graph internals or cross-file index design, study
   then by policy id.
 - `examples/policies/` — canonical example policies.
 - `action.yml` — composite GitHub Action wrapping the binary.
+- `internal/lsp/` — stdio LSP server: protocol structs, message
+  loop, finding→diagnostic conversion. Re-runs full project analysis
+  on didOpen/didSave; didChange is currently a no-op (save refreshes).
 
 ## Build & validate
 
