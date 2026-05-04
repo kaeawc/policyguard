@@ -16,9 +16,13 @@ source:
     - calls: loadUser
 sink:
   any_of:
+    # Canonical FQN, matched when receiver-type tracking is in effect:
+    - calls: com.example.anthropic.Anthropic.messagesCreate
+    # Fallback for codebases without typed fields:
     - calls: client.messagesCreate
 guard:
   any_of:
+    - calls: com.example.redactor.Redactor.redact
     - calls: redactor.redact
 message: User PII reaches LLM call without passing through redactor.
 fix:

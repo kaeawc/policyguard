@@ -52,6 +52,14 @@ type javaExtractor struct {
 	imports map[string]FQN
 	scope   []string // class nesting
 	curFunc FQN
+	// classFields maps a field's simple name to its declared type
+	// (e.g. "redactor" -> "Redactor"). Populated in a pre-pass when
+	// entering a class.
+	classFields map[string]string
+	// localTypes maps a local variable / parameter name to its
+	// declared type. Reset on entering each method, seeded from
+	// classFields plus the method's formal parameters.
+	localTypes map[string]string
 }
 
 func newJavaExtractor(g *Graph, f *scanner.File) *javaExtractor {
@@ -86,6 +94,10 @@ func (e *javaExtractor) walk(n *sitter.Node) {
 	case "method_declaration", "constructor_declaration":
 		e.handleMethod(n)
 		return
+	case "local_variable_declaration":
+		e.recordLocalDeclaration(n)
+		// fall through to recurse into the initializer (which may
+		// contain calls)
 	case "method_invocation":
 		e.handleInvocation(n)
 		// fall through to recurse into args
@@ -152,7 +164,12 @@ func (e *javaExtractor) handleClass(n *sitter.Node) {
 		return
 	}
 	e.scope = append(e.scope, name)
-	defer func() { e.scope = e.scope[:len(e.scope)-1] }()
+	prevFields := e.classFields
+	e.classFields = e.collectFieldTypes(body)
+	defer func() {
+		e.scope = e.scope[:len(e.scope)-1]
+		e.classFields = prevFields
+	}()
 	if body != nil {
 		for i := 0; i < int(body.NamedChildCount()); i++ {
 			e.walk(body.NamedChild(i))
@@ -160,9 +177,71 @@ func (e *javaExtractor) handleClass(n *sitter.Node) {
 	}
 }
 
+// collectFieldTypes walks a class body and returns the map of field
+// simple-name -> declared type name. Only field_declaration nodes are
+// considered; nested classes are out of scope.
+func (e *javaExtractor) collectFieldTypes(body *sitter.Node) map[string]string {
+	out := make(map[string]string)
+	if body == nil {
+		return out
+	}
+	for i := 0; i < int(body.NamedChildCount()); i++ {
+		c := body.NamedChild(i)
+		if c.Type() != "field_declaration" {
+			continue
+		}
+		typeName := e.javaTypeName(c)
+		if typeName == "" {
+			continue
+		}
+		for j := 0; j < int(c.NamedChildCount()); j++ {
+			vc := c.NamedChild(j)
+			if vc.Type() != "variable_declarator" {
+				continue
+			}
+			for k := 0; k < int(vc.NamedChildCount()); k++ {
+				if id := vc.NamedChild(k); id.Type() == "identifier" {
+					out[e.text(id)] = typeName
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// javaTypeName extracts the declared simple type name from a node that
+// has a leading type_identifier or scoped_type_identifier, optionally
+// inside a generic_type wrapper. Returns "" on `var` (inferred type)
+// since we don't infer.
+func (e *javaExtractor) javaTypeName(n *sitter.Node) string {
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		switch c.Type() {
+		case "type_identifier":
+			t := e.text(c)
+			if t == "var" {
+				return ""
+			}
+			return t
+		case "scoped_type_identifier":
+			full := e.text(c)
+			if idx := strings.LastIndex(full, "."); idx >= 0 {
+				return full[idx+1:]
+			}
+			return full
+		case "generic_type":
+			// generic_type wraps a type_identifier or scoped_type_identifier.
+			return e.javaTypeName(c)
+		}
+	}
+	return ""
+}
+
 func (e *javaExtractor) handleMethod(n *sitter.Node) {
 	var name string
 	var body *sitter.Node
+	var params *sitter.Node
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		c := n.NamedChild(i)
 		switch c.Type() {
@@ -170,6 +249,8 @@ func (e *javaExtractor) handleMethod(n *sitter.Node) {
 			if name == "" {
 				name = e.text(c)
 			}
+		case "formal_parameters":
+			params = c
 		case "block", "constructor_body":
 			body = c
 		}
@@ -193,12 +274,71 @@ func (e *javaExtractor) handleMethod(n *sitter.Node) {
 	})
 
 	prevFunc := e.curFunc
+	prevLocals := e.localTypes
 	e.curFunc = fqn
-	defer func() { e.curFunc = prevFunc }()
+	e.localTypes = e.seedLocalTypes(params)
+	defer func() {
+		e.curFunc = prevFunc
+		e.localTypes = prevLocals
+	}()
 
 	if body != nil {
 		for i := 0; i < int(body.NamedChildCount()); i++ {
 			e.walk(body.NamedChild(i))
+		}
+	}
+}
+
+// seedLocalTypes returns the starting locals map for a method: class
+// fields plus formal parameters. New locals from local_variable_
+// declaration nodes are added during body walk.
+func (e *javaExtractor) seedLocalTypes(params *sitter.Node) map[string]string {
+	out := make(map[string]string, len(e.classFields))
+	for k, v := range e.classFields {
+		out[k] = v
+	}
+	if params == nil {
+		return out
+	}
+	for i := 0; i < int(params.NamedChildCount()); i++ {
+		c := params.NamedChild(i)
+		if c.Type() != "formal_parameter" {
+			continue
+		}
+		typeName := e.javaTypeName(c)
+		if typeName == "" {
+			continue
+		}
+		for j := 0; j < int(c.NamedChildCount()); j++ {
+			if id := c.NamedChild(j); id.Type() == "identifier" {
+				out[e.text(id)] = typeName
+				break
+			}
+		}
+	}
+	return out
+}
+
+// recordLocalDeclaration captures `Type name = ...` and
+// `Type name1, name2;` style local declarations. Called during walk.
+func (e *javaExtractor) recordLocalDeclaration(n *sitter.Node) {
+	if e.localTypes == nil {
+		return
+	}
+	typeName := e.javaTypeName(n)
+	if typeName == "" {
+		return
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		vc := n.NamedChild(i)
+		if vc.Type() != "variable_declarator" {
+			continue
+		}
+		for j := 0; j < int(vc.NamedChildCount()); j++ {
+			if id := vc.NamedChild(j); id.Type() == "identifier" {
+				e.localTypes[e.text(id)] = typeName
+				break
+			}
 		}
 	}
 }
@@ -236,14 +376,45 @@ func (e *javaExtractor) handleInvocation(n *sitter.Node) {
 	} else {
 		raw = e.text(name)
 	}
+	callee := e.resolveCallee(raw, object == nil)
+	// If the receiver is a single identifier whose type we know, prefer
+	// the type-resolved FQN over the raw-text fallback. We still leave
+	// Raw set to the original expression so policies that match by raw
+	// (e.g. `redactor.redact`) keep working.
+	if object != nil && object.Type() == "identifier" {
+		if typeFQN, ok := e.lookupReceiverFQN(e.text(object)); ok {
+			callee = FQN(typeFQN + "." + e.text(name))
+		}
+	}
 	e.g.AddCall(&CallSite{
 		Caller: e.curFunc,
-		Callee: e.resolveCallee(raw, object == nil),
+		Callee: callee,
 		Raw:    raw,
 		File:   e.file,
 		Node:   n,
 		Line:   int(n.StartPoint().Row) + 1,
 	})
+}
+
+// lookupReceiverFQN returns the canonical type FQN for a variable name
+// using the current method's local-type map and the import map. Returns
+// false if the variable name isn't tracked or its type can't be
+// resolved. Same-package types fall back to <pkg>.<TypeName>.
+func (e *javaExtractor) lookupReceiverFQN(varName string) (string, bool) {
+	if e.localTypes == nil {
+		return "", false
+	}
+	typeName, ok := e.localTypes[varName]
+	if !ok {
+		return "", false
+	}
+	if path, ok := e.imports[typeName]; ok {
+		return string(path), true
+	}
+	if e.pkg != "" {
+		return string(e.pkg) + "." + typeName, true
+	}
+	return typeName, true
 }
 
 // resolveCallee maps a raw invocation expression to an FQN. If the head
