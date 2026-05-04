@@ -9,6 +9,7 @@ import (
 	"os"
 
 	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/smacker/go-tree-sitter/golang"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
 )
@@ -70,6 +71,8 @@ func tsLanguage(lang Language) (*sitter.Language, error) {
 		return python.GetLanguage(), nil
 	case LangTypeScript:
 		return typescript.GetLanguage(), nil
+	case LangGo:
+		return golang.GetLanguage(), nil
 	default:
 		return nil, fmt.Errorf("unsupported language: %s", lang)
 	}
