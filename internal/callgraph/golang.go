@@ -44,6 +44,18 @@ import (
 func BuildGo(files []*scanner.File, rootDir string) *Graph {
 	g := NewGraph()
 	modulePath := findGoModulePath(rootDir)
+	// Phase A: register every function/method and its return type so
+	// phase B can infer the type of a local declared as `r := f()`.
+	for _, f := range files {
+		if f.Language != scanner.LangGo {
+			continue
+		}
+		modFQN := goModuleFQN(f.Path, rootDir, modulePath)
+		ext := newGoExtractor(g, f, modFQN)
+		ext.discoverFunctions(f.Root())
+	}
+	// Phase B: walk bodies with the now-complete Funcs map. Locals
+	// declared as `r := f()` look up f()'s return type via g.Funcs.
 	for _, f := range files {
 		if f.Language != scanner.LangGo {
 			continue
@@ -188,6 +200,10 @@ func (e *goExtractor) walk(n *sitter.Node) {
 		if !goSelectorIsCallFunction(n) {
 			e.handleFieldAccess(n)
 		}
+	case "short_var_declaration":
+		e.recordShortVarDeclaration(n)
+		// fall through to recurse so the RHS call still registers as
+		// a call site
 	}
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		e.walk(n.NamedChild(i))
@@ -266,6 +282,137 @@ func isGoVersionSegment(seg string) bool {
 	return true
 }
 
+// discoverFunctions walks the file registering imports and
+// function/method declarations (with their return-type FQNs) without
+// descending into bodies. Imports are discovered here because the
+// return-type extractor consults the import map to resolve qualified
+// types like `*pkg.Type` to their canonical FQN.
+func (e *goExtractor) discoverFunctions(n *sitter.Node) {
+	if n == nil {
+		return
+	}
+	switch n.Type() {
+	case "import_declaration":
+		e.handleImportDeclaration(n)
+		return
+	case "function_declaration":
+		e.registerFunction(n, "")
+		return
+	case "method_declaration":
+		e.registerMethod(n)
+		return
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		e.discoverFunctions(n.NamedChild(i))
+	}
+}
+
+func (e *goExtractor) registerFunction(n *sitter.Node, recvType string) {
+	name := n.ChildByFieldName("name")
+	if name == nil {
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			if c := n.NamedChild(i); c.Type() == "identifier" {
+				name = c
+				break
+			}
+		}
+	}
+	if name == nil {
+		return
+	}
+	fqn := e.composeGoFuncFQN(e.text(name), recvType)
+	e.g.AddFunc(&FuncNode{
+		FQN:           fqn,
+		File:          e.file,
+		Node:          n,
+		Line:          int(n.StartPoint().Row) + 1,
+		ReturnTypeFQN: e.goReturnTypeFQN(n),
+	})
+}
+
+func (e *goExtractor) registerMethod(n *sitter.Node) {
+	var recv *sitter.Node
+	var name string
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		switch c.Type() {
+		case "parameter_list":
+			if recv == nil {
+				recv = c
+			}
+		case "field_identifier":
+			name = e.text(c)
+		}
+	}
+	if name == "" {
+		return
+	}
+	recvType := goReceiverType(recv, e.file.Source)
+	fqn := e.composeGoFuncFQN(name, recvType)
+	e.g.AddFunc(&FuncNode{
+		FQN:           fqn,
+		File:          e.file,
+		Node:          n,
+		Line:          int(n.StartPoint().Row) + 1,
+		ReturnTypeFQN: e.goReturnTypeFQN(n),
+	})
+}
+
+func (e *goExtractor) composeGoFuncFQN(name, recvType string) FQN {
+	parts := []string{}
+	if e.modFQN != "" {
+		parts = append(parts, string(e.modFQN))
+	}
+	if recvType != "" {
+		parts = append(parts, recvType)
+	}
+	parts = append(parts, name)
+	return FQN(strings.Join(parts, "."))
+}
+
+// goReturnTypeFQN extracts a single-return type FQN from the function
+// or method declaration. Multi-return signatures (the second
+// parameter_list child) are not yet handled; void returns and unknown
+// types yield "".
+func (e *goExtractor) goReturnTypeFQN(defNode *sitter.Node) string {
+	// Skip past name, receiver list (if method), and the args list to
+	// find the return type. Strategy: collect the parameter_list nodes
+	// in source order; the return type, when present and single, is
+	// the named child immediately following the args parameter_list
+	// (not block / not type_parameter_list).
+	var afterArgs *sitter.Node
+	seenParamList := 0
+	wantSeen := 1
+	if defNode.Type() == "method_declaration" {
+		wantSeen = 2 // receiver + args
+	}
+	for i := 0; i < int(defNode.NamedChildCount()); i++ {
+		c := defNode.NamedChild(i)
+		if c.Type() == "parameter_list" {
+			seenParamList++
+			continue
+		}
+		if seenParamList >= wantSeen {
+			if c.Type() == "block" {
+				break
+			}
+			if c.Type() == "type_parameter_list" {
+				continue
+			}
+			afterArgs = c
+			break
+		}
+	}
+	if afterArgs == nil {
+		return ""
+	}
+	if afterArgs.Type() == "parameter_list" {
+		// Multi-return — skip for now.
+		return ""
+	}
+	return e.goTypeFQN(afterArgs)
+}
+
 func (e *goExtractor) handleFunction(n *sitter.Node) {
 	name := n.ChildByFieldName("name")
 	if name == nil {
@@ -337,22 +484,19 @@ func goReceiverType(paramList *sitter.Node, src []byte) string {
 }
 
 func (e *goExtractor) recordAndRecurse(defNode *sitter.Node, funcName, receiverType string, params, recv *sitter.Node) {
-	parts := []string{}
-	if e.modFQN != "" {
-		parts = append(parts, string(e.modFQN))
+	fqn := e.composeGoFuncFQN(funcName, receiverType)
+	// Phase A typically registered this FuncNode already. Only AddFunc
+	// when it's missing — otherwise we'd overwrite a complete entry
+	// (with ReturnTypeFQN already set) with a slimmer one.
+	if _, ok := e.g.Funcs[fqn]; !ok {
+		e.g.AddFunc(&FuncNode{
+			FQN:           fqn,
+			File:          e.file,
+			Node:          defNode,
+			Line:          int(defNode.StartPoint().Row) + 1,
+			ReturnTypeFQN: e.goReturnTypeFQN(defNode),
+		})
 	}
-	if receiverType != "" {
-		parts = append(parts, receiverType)
-	}
-	parts = append(parts, funcName)
-	fqn := FQN(strings.Join(parts, "."))
-
-	e.g.AddFunc(&FuncNode{
-		FQN:  fqn,
-		File: e.file,
-		Node: defNode,
-		Line: int(defNode.StartPoint().Row) + 1,
-	})
 
 	prevFunc := e.curFunc
 	prevLocals := e.localTypes
@@ -480,6 +624,70 @@ func firstChildOfType(n *sitter.Node, t string) *sitter.Node {
 		}
 	}
 	return nil
+}
+
+// recordShortVarDeclaration captures `r := <call>()` patterns and
+// binds the LHS variable name to the call's return-type FQN, when
+// known. Multi-LHS (e.g. `r, err := f()`) is supported only for the
+// common case where r is the first return value.
+func (e *goExtractor) recordShortVarDeclaration(n *sitter.Node) {
+	if e.localTypes == nil {
+		return
+	}
+	left, right := goShortVarLHSandRHS(n)
+	if left == nil || right == nil {
+		return
+	}
+	rhs := goSingleRHSCall(right)
+	if rhs == nil {
+		return
+	}
+	calleeFQN := e.resolveCallee(e.text(rhs.ChildByFieldName("function")))
+	fn, ok := e.g.Funcs[calleeFQN]
+	if !ok || fn.ReturnTypeFQN == "" {
+		return
+	}
+	for i := 0; i < int(left.NamedChildCount()); i++ {
+		if id := left.NamedChild(i); id.Type() == "identifier" {
+			e.localTypes[e.text(id)] = fn.ReturnTypeFQN
+			return // bind only the first; multi-return inference is a follow-up
+		}
+	}
+}
+
+func goShortVarLHSandRHS(n *sitter.Node) (*sitter.Node, *sitter.Node) {
+	left := n.ChildByFieldName("left")
+	right := n.ChildByFieldName("right")
+	if left != nil && right != nil {
+		return left, right
+	}
+	// Fall back to positional: first expression_list is LHS, second is RHS.
+	var lists []*sitter.Node
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		c := n.NamedChild(i)
+		if c.Type() == "expression_list" {
+			lists = append(lists, c)
+		}
+	}
+	if len(lists) >= 2 {
+		return lists[0], lists[1]
+	}
+	return nil, nil
+}
+
+// goSingleRHSCall returns the RHS expression list's call_expression
+// when there is exactly one, else nil. Right-hand sides with multiple
+// values, non-call expressions, or composite literals don't yield a
+// type binding.
+func goSingleRHSCall(right *sitter.Node) *sitter.Node {
+	if right.NamedChildCount() != 1 {
+		return nil
+	}
+	c := right.NamedChild(0)
+	if c.Type() != "call_expression" {
+		return nil
+	}
+	return c
 }
 
 func (e *goExtractor) handleCall(n *sitter.Node) {
