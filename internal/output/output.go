@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/kaeawc/policyguard/internal/callgraph"
 	"github.com/kaeawc/policyguard/internal/engine"
 	"github.com/kaeawc/policyguard/internal/policy"
 )
@@ -81,30 +80,54 @@ func renderText(w io.Writer, args Args) error {
 // isInterprocedural reports whether the chain spans more than one
 // function (a chain of length 1 is just the violator itself, which
 // doesn't add information).
-func isInterprocedural(chain []callgraph.FQN) bool {
+func isInterprocedural(chain []engine.ChainHop) bool {
 	return len(chain) > 1
 }
 
-// chainStrings flattens a chain to []string. Returns nil for chains
-// that are intra-procedural (length <= 1) so the JSON omits the field
-// entirely.
-func chainStrings(chain []callgraph.FQN) []string {
+// chainHopsJSON flattens a chain to its JSON wire shape. Returns nil
+// for intra-procedural chains so the field is omitted entirely.
+func chainHopsJSON(chain []engine.ChainHop) []jsonChainHop {
 	if !isInterprocedural(chain) {
 		return nil
 	}
-	out := make([]string, len(chain))
-	for i, c := range chain {
-		out[i] = string(c)
+	out := make([]jsonChainHop, len(chain))
+	for i, hop := range chain {
+		out[i] = jsonChainHop{Function: string(hop.Function)}
+		if hop.Path != "" {
+			out[i].Path = hop.Path
+			out[i].Line = hop.Line
+		}
 	}
 	return out
 }
 
-func joinChain(chain []callgraph.FQN) string {
+// joinChain renders a chain as `A (file:line) -> B (file:line) -> C`.
+// The parenthesized bridge is omitted on the final hop (which is the
+// destination, not a bridge to a further hop).
+func joinChain(chain []engine.ChainHop) string {
 	parts := make([]string, len(chain))
-	for i, c := range chain {
-		parts[i] = string(c)
+	for i, hop := range chain {
+		s := string(hop.Function)
+		if hop.Path != "" {
+			s = fmt.Sprintf("%s (%s:%d)", s, hop.Path, hop.Line)
+		}
+		parts[i] = s
 	}
 	return strings.Join(parts, " -> ")
+}
+
+// joinChainMarkdown renders a chain with clickable file:line links.
+func joinChainMarkdown(chain []engine.ChainHop) string {
+	parts := make([]string, len(chain))
+	for i, hop := range chain {
+		s := fmt.Sprintf("`%s`", hop.Function)
+		if hop.Path != "" {
+			s = fmt.Sprintf("%s ([%s:%d](%s#L%d))",
+				s, hop.Path, hop.Line, hop.Path, hop.Line)
+		}
+		parts[i] = s
+	}
+	return strings.Join(parts, " → ")
 }
 
 // ------------------------------------------------------------ markdown
@@ -168,12 +191,12 @@ func renderMarkdownFinding(w io.Writer, f engine.Finding) error {
 		return err
 	}
 	if isInterprocedural(f.SourceChain) {
-		if _, err := fmt.Fprintf(w, "- source path: `%s`\n", joinChain(f.SourceChain)); err != nil {
+		if _, err := fmt.Fprintf(w, "- source path: %s\n", joinChainMarkdown(f.SourceChain)); err != nil {
 			return err
 		}
 	}
 	if isInterprocedural(f.SinkChain) {
-		if _, err := fmt.Fprintf(w, "- sink path: `%s`\n", joinChain(f.SinkChain)); err != nil {
+		if _, err := fmt.Fprintf(w, "- sink path: %s\n", joinChainMarkdown(f.SinkChain)); err != nil {
 			return err
 		}
 	}
@@ -191,8 +214,16 @@ type jsonFinding struct {
 	Function    string          `json:"function"`
 	Source      jsonSite        `json:"source"`
 	Sink        jsonSite        `json:"sink"`
-	SourceChain []string        `json:"source_chain,omitempty"`
-	SinkChain   []string        `json:"sink_chain,omitempty"`
+	SourceChain []jsonChainHop  `json:"source_chain,omitempty"`
+	SinkChain   []jsonChainHop  `json:"sink_chain,omitempty"`
+}
+
+// jsonChainHop is the wire shape for a single chain hop. Path/Line are
+// omitted on the last hop (which is the destination, not a bridge).
+type jsonChainHop struct {
+	Function string `json:"function"`
+	Path     string `json:"path,omitempty"`
+	Line     int    `json:"line,omitempty"`
 }
 
 type jsonSite struct {
@@ -219,8 +250,8 @@ func renderJSON(w io.Writer, args Args) error {
 				Path:   f.Sink.Path,
 				Line:   f.Sink.Line,
 			},
-			SourceChain: chainStrings(f.SourceChain),
-			SinkChain:   chainStrings(f.SinkChain),
+			SourceChain: chainHopsJSON(f.SourceChain),
+			SinkChain:   chainHopsJSON(f.SinkChain),
 		})
 	}
 	enc := json.NewEncoder(w)

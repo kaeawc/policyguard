@@ -55,8 +55,18 @@ type Finding struct {
 	// sink. Both start at Function and end at the containing function.
 	// Intra-procedural findings have chains of length 1 ([Function]).
 	// Module-scope findings (Function == "<module>") have nil chains.
-	SourceChain []callgraph.FQN
-	SinkChain   []callgraph.FQN
+	SourceChain []ChainHop
+	SinkChain   []ChainHop
+}
+
+// ChainHop is one step in a counterexample chain. Function is the FQN
+// at this hop. Path/Line locate the call expression where this function
+// invokes the next hop in the chain — they are zero/empty for the last
+// hop, which is the destination function and has no further bridge.
+type ChainHop struct {
+	Function callgraph.FQN
+	Path     string
+	Line     int
 }
 
 // FindingSite is one endpoint of a violation.
@@ -88,6 +98,7 @@ func Analyze(g *callgraph.Graph, p *policy.Policy) []Finding {
 // when F calls G and both their closures violate, only G is reported.
 func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 	callees := buildCalleeMap(g)
+	bridges := buildBridgeMap(g)
 	closures := make(map[callgraph.FQN]map[callgraph.FQN]bool, len(g.Funcs))
 	for fqn := range g.Funcs {
 		closures[fqn] = transitiveCallees(fqn, callees)
@@ -102,8 +113,8 @@ func analyzeFunctions(g *callgraph.Graph, p *policy.Policy) []Finding {
 		if !ok {
 			continue
 		}
-		f.SourceChain = shortestPath(fqn, srcCarrier, callees)
-		f.SinkChain = shortestPath(fqn, sinkCarrier, callees)
+		f.SourceChain = chainHops(shortestPath(fqn, srcCarrier, callees), bridges)
+		f.SinkChain = chainHops(shortestPath(fqn, sinkCarrier, callees), bridges)
 		violators[fqn] = f
 	}
 
@@ -260,6 +271,56 @@ func buildCalleeMap(g *callgraph.Graph) map[callgraph.FQN][]callgraph.FQN {
 			}
 			seen[caller][s.Callee] = true
 			out[caller] = append(out[caller], s.Callee)
+		}
+	}
+	return out
+}
+
+// bridgeKey identifies the (caller, callee) edge in the call graph; the
+// bridges map records the first call site connecting them, used to
+// annotate counterexample chains with file:line per hop.
+type bridgeKey struct {
+	caller callgraph.FQN
+	callee callgraph.FQN
+}
+
+// buildBridgeMap collapses g.Calls into (caller, callee) -> first
+// CallSite. Only edges where the callee resolves to a known internal
+// function are kept — those are the only edges chain BFS traverses.
+func buildBridgeMap(g *callgraph.Graph) map[bridgeKey]*callgraph.CallSite {
+	out := make(map[bridgeKey]*callgraph.CallSite)
+	for caller, sites := range g.Calls {
+		if caller == "" {
+			continue
+		}
+		for _, s := range sites {
+			if _, ok := g.Funcs[s.Callee]; !ok {
+				continue
+			}
+			k := bridgeKey{caller, s.Callee}
+			if _, exists := out[k]; !exists {
+				out[k] = s
+			}
+		}
+	}
+	return out
+}
+
+// chainHops decorates a sequence of FQNs with the call-site location
+// where each function calls the next. The last hop has empty Path/Line
+// because it's the destination, not a bridge.
+func chainHops(path []callgraph.FQN, bridges map[bridgeKey]*callgraph.CallSite) []ChainHop {
+	if len(path) == 0 {
+		return nil
+	}
+	out := make([]ChainHop, len(path))
+	for i, fqn := range path {
+		out[i] = ChainHop{Function: fqn}
+		if i+1 < len(path) {
+			if cs, ok := bridges[bridgeKey{fqn, path[i+1]}]; ok && cs != nil && cs.File != nil {
+				out[i].Path = cs.File.Path
+				out[i].Line = cs.Line
+			}
 		}
 	}
 	return out
