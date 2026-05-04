@@ -48,6 +48,9 @@ func runPipeline(t *testing.T, srcDir string, p *policy.Policy) []engine.Finding
 	case policy.LangTypeScript:
 		sLang = scanner.LangTypeScript
 		exts = []string{".ts", ".tsx"}
+	case policy.LangGo:
+		sLang = scanner.LangGo
+		exts = []string{".go"}
 	default:
 		t.Fatalf("integration test does not support language %q", lang)
 	}
@@ -86,6 +89,8 @@ func runPipeline(t *testing.T, srcDir string, p *policy.Policy) []engine.Finding
 		g = callgraph.BuildPython(files, srcDir)
 	case scanner.LangTypeScript:
 		g = callgraph.BuildTypeScript(files, srcDir)
+	case scanner.LangGo:
+		g = callgraph.BuildGo(files, srcDir)
 	}
 	return engine.Analyze(g, p)
 }
@@ -215,6 +220,14 @@ func TestExample_PIIRedactionBeforeLLM_TypeScript(t *testing.T) {
 		"examples/policies/pii-redaction-before-llm-ts.yaml",
 		"tests/fixtures/typescript/policies/pii_redaction_before_llm",
 		"anthropic.messages.create",
+	)
+}
+
+func TestExample_PIIRedactionBeforeLLM_Go(t *testing.T) {
+	runExample(t,
+		"examples/policies/pii-redaction-before-llm-go.yaml",
+		"tests/fixtures/go/policies/pii_redaction_before_llm",
+		"github.com/anthropic/anthropic-sdk-go.Messages.Create",
 	)
 }
 

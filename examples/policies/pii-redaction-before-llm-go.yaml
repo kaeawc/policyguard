@@ -1,0 +1,21 @@
+# PII redaction before LLM (Go variant)
+#
+# Mirror of pii-redaction-before-llm.yaml with Go-shaped FQNs. Imports
+# resolve via the import path: `import llm "github.com/anthropic/..."`
+# makes `llm.Messages.Create(...)` resolve to
+# `github.com/anthropic/anthropic-sdk-go.Messages.Create`.
+id: pii-redaction-before-llm-go
+severity: error
+languages: [go]
+source:
+  any_of:
+    - calls: handler.loadUser
+    - calls: loadUser
+sink:
+  any_of:
+    - calls: github.com/anthropic/anthropic-sdk-go.Messages.Create
+    - calls: github.com/openai/openai-go.Chat.Completions.Create
+guard:
+  any_of:
+    - calls: redactor.Redact
+message: User PII reaches LLM call without passing through redactor.
