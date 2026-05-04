@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -142,6 +143,7 @@ func (c *runChecker) runCheck(ctx context.Context, argv []string, stdout, stderr
 	lang := fset.String("lang", "python", "source language (python|typescript|go|java)")
 	policiesDir := fset.String("policies", "", "directory containing policy YAML files")
 	format := fset.String("format", "text", "output format: text|json|sarif|markdown")
+	apply := fset.Bool("apply", false, "apply structured patches in place (modifies files)")
 	var policyFiles stringSlice
 	fset.Var(&policyFiles, "policy", "single policy file (repeatable)")
 	if err := fset.Parse(argv); err != nil {
@@ -179,10 +181,114 @@ func (c *runChecker) runCheck(ctx context.Context, argv []string, stdout, stderr
 		fmt.Fprintf(stderr, "policyguard: %v\n", err)
 		return 2
 	}
-	if len(allFindings) > 0 {
+	if !*apply {
+		if len(allFindings) > 0 {
+			return 1
+		}
+		return 0
+	}
+	return applyPatches(stdout, stderr, allFindings)
+}
+
+// pendingPatch pairs a patch with the policy that produced it for
+// diagnostic output during apply.
+type pendingPatch struct {
+	policy string
+	patch  *engine.FindingPatch
+}
+
+// applyPatches writes every finding's structured patch to its source
+// file in place. Returns 0 when every finding had a patch and all
+// patches were applied, 1 if any finding lacked a patch (something
+// needed manual attention) or a write failed.
+//
+// Writes are batched per file: patches on the same path are sorted by
+// line and applied to the in-memory copy before the file is rewritten
+// once. A patch is skipped (with a warning) when:
+//   - The file's current contents at that line don't match Patch.OldLine
+//     (e.g. another tool already modified it).
+//   - Two patches target the same line.
+func applyPatches(stdout, stderr io.Writer, findings []engine.Finding) int {
+	byFile := make(map[string][]pendingPatch)
+	noPatch := 0
+	for _, f := range findings {
+		if f.Fix == nil || f.Fix.Patch == nil {
+			noPatch++
+			continue
+		}
+		byFile[f.Fix.Patch.Path] = append(byFile[f.Fix.Patch.Path], pendingPatch{
+			policy: f.PolicyID,
+			patch:  f.Fix.Patch,
+		})
+	}
+
+	applied := 0
+	failed := 0
+	for path, patches := range byFile {
+		// Sort descending by line so earlier patches don't shift the
+		// later ones in the in-memory buffer (irrelevant for single-
+		// line edits but cheap insurance).
+		sort.Slice(patches, func(i, j int) bool {
+			return patches[i].patch.Line > patches[j].patch.Line
+		})
+		ok, applyCount := applyFilePatches(stderr, path, patches)
+		applied += applyCount
+		if !ok {
+			failed++
+		}
+	}
+
+	fmt.Fprintf(stdout, "\napply: %d patch(es) applied across %d file(s)", applied, len(byFile))
+	if noPatch > 0 {
+		fmt.Fprintf(stdout, "; %d finding(s) had no structured patch", noPatch)
+	}
+	fmt.Fprintln(stdout)
+
+	if failed > 0 || noPatch > 0 {
 		return 1
 	}
 	return 0
+}
+
+func applyFilePatches(stderr io.Writer, path string, patches []pendingPatch) (ok bool, applied int) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "policyguard: apply: read %s: %v\n", path, err)
+		return false, 0
+	}
+	lines := strings.Split(string(src), "\n")
+	seen := make(map[int]bool)
+	for _, p := range patches {
+		idx := p.patch.Line - 1
+		if idx < 0 || idx >= len(lines) {
+			fmt.Fprintf(stderr, "policyguard: apply %s:%d: line out of range\n", path, p.patch.Line)
+			return false, applied
+		}
+		if seen[idx] {
+			fmt.Fprintf(stderr, "policyguard: apply %s:%d: conflicting patch (skipping)\n", path, p.patch.Line)
+			continue
+		}
+		if lines[idx] != p.patch.OldLine {
+			fmt.Fprintf(stderr, "policyguard: apply %s:%d: file content changed since analysis (skipping)\n", path, p.patch.Line)
+			continue
+		}
+		lines[idx] = p.patch.NewLine
+		seen[idx] = true
+		applied++
+	}
+	if applied == 0 {
+		return true, 0
+	}
+	out := strings.Join(lines, "\n")
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := os.WriteFile(path, []byte(out), mode); err != nil {
+		fmt.Fprintf(stderr, "policyguard: apply: write %s: %v\n", path, err)
+		return false, applied
+	}
+	return true, applied
 }
 
 // runPipeline parses srcRoot, builds the call graph, and runs every

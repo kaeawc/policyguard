@@ -112,7 +112,7 @@ jobs:
         with:
           go-version-file: 'go.mod'
       - run: go install github.com/securego/gosec/v2/cmd/gosec@latest
-      - run: gosec -exclude=G104,G304 -fmt=junit-xml -out=gosec-report.xml -stdout ./...
+      - run: gosec -exclude=G104,G304,G703 -fmt=junit-xml -out=gosec-report.xml -stdout ./...
       - id: gosec-report-exists
         uses: andstor/file-existence-action@v3
         with:

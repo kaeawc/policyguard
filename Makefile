@@ -23,7 +23,7 @@ complexity:
 	gocyclo -over 12 -ignore '_test\.go$$' .
 
 security:
-	gosec -exclude=G104,G304 ./...
+	gosec -exclude=G104,G304,G703 ./...
 
 tidy:
 	go mod tidy

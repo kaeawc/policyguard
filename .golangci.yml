@@ -32,6 +32,7 @@ linters:
       excludes:
         - G104  # best-effort cleanup is intentional
         - G304  # path is caller input by design (file scanning)
+        - G703  # same path-as-input rationale as G304 (used by --apply)
   exclusions:
     generated: lax
     presets:
