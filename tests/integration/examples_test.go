@@ -51,6 +51,9 @@ func runPipeline(t *testing.T, srcDir string, p *policy.Policy) []engine.Finding
 	case policy.LangGo:
 		sLang = scanner.LangGo
 		exts = []string{".go"}
+	case policy.LangJava:
+		sLang = scanner.LangJava
+		exts = []string{".java"}
 	default:
 		t.Fatalf("integration test does not support language %q", lang)
 	}
@@ -91,6 +94,8 @@ func runPipeline(t *testing.T, srcDir string, p *policy.Policy) []engine.Finding
 		g = callgraph.BuildTypeScript(files, srcDir)
 	case scanner.LangGo:
 		g = callgraph.BuildGo(files, srcDir)
+	case scanner.LangJava:
+		g = callgraph.BuildJava(files, srcDir)
 	}
 	return engine.Analyze(g, p)
 }
@@ -228,6 +233,16 @@ func TestExample_PIIRedactionBeforeLLM_Go(t *testing.T) {
 		"examples/policies/pii-redaction-before-llm-go.yaml",
 		"tests/fixtures/go/policies/pii_redaction_before_llm",
 		"github.com/anthropic/anthropic-sdk-go.Messages.Create",
+	)
+}
+
+func TestExample_PIIRedactionBeforeLLM_Java(t *testing.T) {
+	runExample(t,
+		"examples/policies/pii-redaction-before-llm-java.yaml",
+		"tests/fixtures/java/policies/pii_redaction_before_llm",
+		// Resolved sink callee — `client` isn't an imported simple name
+		// so it falls back to the package-prefixed form.
+		"com.example.app.client.messagesCreate",
 	)
 }
 

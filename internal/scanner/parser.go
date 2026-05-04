@@ -10,6 +10,7 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/java"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
 )
@@ -21,6 +22,7 @@ const (
 	LangPython     Language = "python"
 	LangTypeScript Language = "typescript"
 	LangGo         Language = "go"
+	LangJava       Language = "java"
 )
 
 // File is a parsed source file plus its tree-sitter tree.
@@ -73,6 +75,8 @@ func tsLanguage(lang Language) (*sitter.Language, error) {
 		return typescript.GetLanguage(), nil
 	case LangGo:
 		return golang.GetLanguage(), nil
+	case LangJava:
+		return java.GetLanguage(), nil
 	default:
 		return nil, fmt.Errorf("unsupported language: %s", lang)
 	}
